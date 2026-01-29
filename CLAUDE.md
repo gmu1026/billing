@@ -34,68 +34,99 @@ billing/
 │   └── app/
 │       ├── api/
 │       │   ├── alibaba.py    # 알리바바 빌링 데이터 API
-│       │   └── master.py     # 마스터 데이터 API (BP, 계정, 세금코드 등)
+│       │   ├── master.py     # 마스터 데이터 API (BP, 계정코드 등)
+│       │   └── hb.py         # HB 연동 API (Company, Contract, Account)
 │       ├── models/
-│       │   └── alibaba.py    # SQLAlchemy 모델
+│       │   ├── alibaba.py    # 빌링 + 마스터 모델
+│       │   └── hb.py         # HB 연동 모델
 │       ├── main.py
 │       └── database.py
 ├── frontend/
-├── data_sample/              # 샘플 데이터 (업로드 테스트용)
+├── data_sample/              # 샘플 데이터
 └── CLAUDE.md
 ```
 
 ### Database Models
 
+**빌링 데이터**
 | 테이블 | 설명 |
 |--------|------|
-| `alibaba_billing` | 알리바바 빌링 원본 데이터 (enduser/reseller) |
-| `bp_codes` | 거래처 마스터 (BP번호, 이름, 사업자번호, 대표자명 등) |
+| `alibaba_billing` | 알리바바 빌링 원본 (enduser/reseller) |
+
+**마스터 데이터**
+| 테이블 | 설명 |
+|--------|------|
+| `bp_codes` | 거래처 마스터 (BP번호, 이름, 사업자번호, 대표자명) |
 | `account_codes` | 계정코드 마스터 (HKONT) |
-| `tax_codes` | 세금코드 마스터 (매출/매입 구분) |
+| `tax_codes` | 세금코드 마스터 |
 | `cost_centers` | 부서(코스트센터) 마스터 |
-| `contract_codes` | 계약번호 마스터 (매출ALI999 ↔ 매입ALI999) |
+| `contract_codes` | 계약번호 마스터 |
+
+**HB 연동 (UID ↔ 계약 ↔ 회사 매핑)**
+| 테이블 | 설명 |
+|--------|------|
+| `hb_companies` | 회사 정보 (HB company) |
+| `hb_contracts` | 계약 정보 (HB contract) |
+| `hb_vendor_accounts` | 클라우드 계정/UID (HB account) |
+| `account_contract_mappings` | 계정-계약 N:N 매핑 |
+
+### 데이터 관계
+```
+AlibabaBilling.user_id/linked_user_id
+        ↓ (UID로 조회)
+HBVendorAccount.id
+        ↓ (N:N 매핑)
+HBContract.seq
+        ↓ (FK)
+HBCompany.seq
+        ↓ (수동 매핑)
+BPCode.bp_number
+```
 
 ### API Endpoints
 
 **알리바바 빌링** (`/api/alibaba`)
-| Method | Endpoint | 설명 |
-|--------|----------|------|
-| POST | `/upload/{billing_type}` | 빌링 데이터 업로드 (enduser/reseller) |
-| GET | `/` | 빌링 데이터 조회 |
-| GET | `/summary` | UID별 합계 조회 |
-| DELETE | `/` | 빌링 데이터 삭제 |
+- `POST /upload/{billing_type}` - 빌링 데이터 업로드
+- `GET /` - 빌링 데이터 조회
+- `GET /summary` - UID별 합계
 
 **마스터 데이터** (`/api/master`)
-| Method | Endpoint | 설명 |
-|--------|----------|------|
-| POST | `/bp-codes/upload` | BP Code 업로드 |
-| GET | `/bp-codes` | BP Code 검색 |
-| POST | `/account-codes/upload` | 계정코드 업로드 |
-| POST | `/tax-codes/upload` | 세금코드 업로드 |
-| POST | `/cost-centers/upload` | 부서코드 업로드 |
-| POST | `/contracts/upload` | 계약번호 업로드 |
+- `POST /bp-codes/upload`, `GET /bp-codes` - BP코드
+- `POST /account-codes/upload`, `GET /account-codes` - 계정코드
+- `POST /tax-codes/upload`, `GET /tax-codes` - 세금코드
+- `POST /contracts/upload`, `GET /contracts` - 계약번호
+
+**HB 연동** (`/api/hb`)
+- `POST /companies/upload`, `GET /companies`, `PATCH /companies/{seq}` - 회사
+- `POST /contracts/upload`, `GET /contracts`, `PATCH /contracts/{seq}` - 계약
+- `POST /accounts/upload`, `GET /accounts` - 계정(UID)
+- `POST /mappings`, `DELETE /mappings/{id}` - 수동 매핑
+- `GET /billing-lookup?uid=xxx` - UID로 전표 정보 조회
 
 ## Business Logic
 
 ### 빌링 금액 계산
-- **Enduser (매출)**: `pretax_cost` 사용
-- **Reseller (매입)**: `original_cost - discount - spn_deducted_price` (쿠폰이 메인계정으로 지급되어 발생 계약에 안 걸리는 이슈 대응)
+- **Enduser (매출)**: `pretax_cost`
+- **Reseller (매입)**: `original_cost - discount - spn_deducted_price`
+
+### 전표 작성 흐름
+1. 빌링 데이터 업로드 → `alibaba_billing` 저장
+2. UID 기준으로 금액 합산
+3. `/api/hb/billing-lookup?uid=xxx`로 계약/회사/BP 정보 조회
+4. 전표 데이터 생성 (고정값 + 조회된 정보)
 
 ### 전표 고정값 (Alibaba)
 | 필드 | 값 |
 |------|-----|
-| BUKRS (회사코드) | 1100 |
-| WAERS (통화) | KRW |
-| PRCTR (부서코드) | 10000003 |
-| HKONT (계정과목) | 41021010 |
-| 채권과목 | 11060110 또는 21120110 |
-| ZZSCONID (매출계약번호) | 매출ALI999 |
-| ZZPCONID (매입계약번호) | 매입ALI999 |
-| ZZREF2 (거래명) | IBABA001 |
-| ZZINVNO (인보이스) | 수기 입력 |
+| BUKRS | 1100 |
+| WAERS | KRW |
+| PRCTR | 10000003 |
+| HKONT | 41021010 |
+| 채권과목 | 11060110 / 21120110 |
+| ZZREF2 | IBABA001 |
 
-### BP코드 표시 형식
-`BP번호/이름1/도로주소1/세금번호/대표자명`
+### 계약번호 변환
+- 매출: `매출ALI999` ↔ 매입: `매입ALI999`
 
 ## Tech Stack
 - **Backend:** Python 3.12, FastAPI, SQLAlchemy 2.0, UV
