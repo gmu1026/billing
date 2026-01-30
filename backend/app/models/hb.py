@@ -51,6 +51,15 @@ class HBCompany(Base):
     # BP 코드 매핑 (수동 연결)
     bp_number: Mapped[str | None] = mapped_column(String(20), index=True)
 
+    # 내부비용 여부 (매출전표 제외, 매입전표 별도 집계)
+    is_internal_cost: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # 해외법인 여부 (사업자번호 형식으로 구분 가능)
+    is_overseas: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # 기본 통화
+    default_currency: Mapped[str] = mapped_column(String(10), default="KRW")
+
     # 메타데이터
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     hb_created_at: Mapped[datetime | None] = mapped_column(DateTime)

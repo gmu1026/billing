@@ -1,8 +1,15 @@
 import csv
 import io
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+
+
+def round_decimal(value: float, places: int = 2) -> float:
+    """소수점 정확한 반올림 (ROUND_HALF_UP)"""
+    d = Decimal(str(value))
+    return float(d.quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP))
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -60,7 +67,7 @@ async def upload_alibaba_billing(
             coupon_deduct = parse_float(row.get("Coupon Deduct", "0"))
             pretax_cost = parse_float(row.get("Pretax Cost(Before Round Down Discount)", "0"))
 
-            # 계산된 금액 (전표용)
+            # 계산된 금액 (전표용) - 원본 그대로 저장
             if billing_type == "reseller":
                 # 매입: Original Cost - Discount - SPN Deducted (쿠폰 이슈로 인해)
                 calculated = original_cost - discount - spn_deducted

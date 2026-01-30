@@ -207,9 +207,9 @@ def get_account_codes(
     return [
         {
             "hkont": d.hkont,
-            "name": d.name_short,
+            "name_short": d.name_short,
             "name_long": d.name_long,
-            "group": d.account_group,
+            "account_group": d.account_group,
         }
         for d in query.order_by(AccountCode.hkont).limit(100).all()
     ]

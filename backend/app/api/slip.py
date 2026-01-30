@@ -6,9 +6,16 @@ import csv
 import io
 import uuid
 from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+
+def round_decimal(value: float, places: int = 2) -> float:
+    """소수점 정확한 반올림 (ROUND_HALF_UP)"""
+    d = Decimal(str(value))
+    return float(d.quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP))
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -16,6 +23,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
 from app.models.alibaba import AlibabaBilling, BPCode
+from app.models.billing_profile import CompanyBillingProfile
 from app.models.hb import AccountContractMapping, HBCompany, HBContract, HBVendorAccount
 from app.models.slip import ExchangeRate, SlipConfig, SlipRecord
 
@@ -191,7 +199,7 @@ class SlipGenerateRequest(BaseModel):
     billing_cycle: str  # YYYYMM
     slip_type: Literal["sales", "purchase"]  # sales=매출(enduser), purchase=매입(reseller)
     document_date: date  # 증빙일/전기일
-    exchange_rate: float  # 환율
+    exchange_rate: float | None = None  # 환율 (없으면 USD를 그대로 KRW로 사용)
     invoice_number: str | None = None  # 인보이스 번호 (수기)
 
 
@@ -207,10 +215,22 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
     billing_type = "enduser" if data.slip_type == "sales" else "reseller"
     batch_id = str(uuid.uuid4())[:8]
 
-    # 전표 설정 조회
+    # 전표 설정 조회 (없으면 기본값으로 생성 및 저장)
     config = db.query(SlipConfig).filter(SlipConfig.vendor == "alibaba").first()
     if not config:
-        config = SlipConfig(vendor="alibaba")  # 기본값 사용
+        config = SlipConfig(
+            vendor="alibaba",
+            bukrs="1100",
+            prctr="10000003",
+            hkont_sales="41021010",
+            hkont_purchase="42021010",
+            ar_account_default="11060110",
+            ap_account_default="21120110",
+            zzref2="IBABA001",
+            sgtxt_template="Alibaba_Cloud_{MM}월_{TYPE}",
+        )
+        db.add(config)
+        db.commit()
 
     # 빌링 데이터 UID별 합산
     if billing_type == "reseller":
@@ -255,17 +275,24 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
     slips_created = []
     slips_no_mapping = []
+    internal_cost_list = []  # 내부비용 별도 집계
+    overseas_slips = []  # 해외법인 전표 별도 집계
     seqno = 1
 
     for billing in billing_summary:
         uid = billing.uid
-        amount_usd = float(billing.total_amount or 0)
+        # 소수점 2자리 반올림 (ROUND_HALF_UP)
+        amount_usd = round_decimal(float(billing.total_amount or 0), 2)
 
         if amount_usd <= 0:
             continue
 
-        # KRW 변환 (원단위 절사)
-        amount_krw = int(amount_usd * data.exchange_rate)
+        # KRW 변환 (반올림 ROUND_HALF_UP, 환율 없으면 그대로 KRW로 사용)
+        if data.exchange_rate and data.exchange_rate > 0:
+            amount_krw = int(round_decimal(amount_usd * data.exchange_rate, 0))
+        else:
+            # 환율 없으면 USD 금액을 그대로 KRW로 사용
+            amount_krw = int(round_decimal(amount_usd, 0))
 
         # UID로 계약/회사 정보 조회
         account = (
@@ -294,9 +321,63 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         if company:
             bp_number = company.bp_number
 
-        # BP 코드로 채권과목 조회
+        # 내부비용 체크
+        is_internal = company.is_internal_cost if company else False
+
+        if is_internal:
+            # 내부비용인 경우
+            internal_cost_list.append({
+                "uid": uid,
+                "amount_usd": round(amount_usd, 2),
+                "amount_krw": amount_krw,
+                "company_name": company.name if company else None,
+                "contract_name": contract.name if contract else None,
+            })
+            # 매출전표: 완전 제외
+            # 매입전표: 전표에는 안넣지만 집계만 함
+            continue
+
+        # 해외법인 여부 및 통화 결정
+        is_overseas = company.is_overseas if company else False
+        slip_currency = "KRW"  # 기본값
+        slip_amount = amount_krw  # 기본값: KRW 환산액
+
+        if is_overseas and company:
+            # 해외법인: 원화 환산 없이 USD 금액 사용
+            slip_currency = company.default_currency or "USD"
+            slip_amount = int(round_decimal(amount_usd, 0))  # USD 금액 (소수점 제거)
+
+        # 회사별 청구 프로필 조회 (커스텀 계정코드)
+        billing_profile = None
+        if company:
+            billing_profile = (
+                db.query(CompanyBillingProfile)
+                .filter(
+                    CompanyBillingProfile.company_seq == company.seq,
+                    CompanyBillingProfile.vendor == "alibaba",
+                )
+                .first()
+            )
+
+        # 계정코드 결정 (우선순위: 청구프로필 > BP코드 > 기본값)
         ar_account = config.ar_account_default if data.slip_type == "sales" else config.ap_account_default
-        if bp_number:
+        hkont = config.hkont_sales if data.slip_type == "sales" else config.hkont_purchase
+
+        # 1. 청구 프로필에 계정코드가 있으면 사용
+        if billing_profile:
+            if data.slip_type == "sales":
+                if billing_profile.ar_account:
+                    ar_account = billing_profile.ar_account
+                if billing_profile.hkont_sales:
+                    hkont = billing_profile.hkont_sales
+            else:
+                if billing_profile.ap_account:
+                    ar_account = billing_profile.ap_account
+                if billing_profile.hkont_purchase:
+                    hkont = billing_profile.hkont_purchase
+
+        # 2. BP 코드에 계정코드가 있으면 사용 (청구프로필 없는 경우)
+        if bp_number and not billing_profile:
             bp = db.query(BPCode).filter(BPCode.bp_number == bp_number).first()
             if bp:
                 if data.slip_type == "sales" and bp.ar_account:
@@ -304,9 +385,13 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                 elif data.slip_type == "purchase" and bp.ap_account:
                     ar_account = bp.ap_account
 
-        # 계약번호
-        sales_contract = contract.sales_contract_code if contract else "매출ALI999"
-        purchase_contract = sales_contract.replace("매출", "매입") if sales_contract else "매입ALI999"
+        # 계약번호 (없으면 기본값 사용)
+        sales_contract = (
+            contract.sales_contract_code
+            if contract and contract.sales_contract_code
+            else "매출ALI999"
+        )
+        purchase_contract = sales_contract.replace("매출", "매입") if "매출" in sales_contract else "매입ALI999"
 
         # 전표 레코드 생성
         slip = SlipRecord(
@@ -318,15 +403,15 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
             bukrs=config.bukrs,
             bldat=data.document_date,
             budat=data.document_date,
-            waers="KRW",
+            waers=slip_currency,  # 해외: USD 등, 국내: KRW
             sgtxt=sgtxt,
             partner=bp_number,
             partner_name=company.name if company else None,
             ar_account=ar_account,
-            hkont=config.hkont_sales if data.slip_type == "sales" else config.hkont_purchase,
-            wrbtr=amount_krw,
+            hkont=hkont,  # 청구프로필 또는 기본값
+            wrbtr=slip_amount,  # 해외: USD 금액, 국내: KRW 환산액
             wrbtr_usd=amount_usd,
-            exchange_rate=data.exchange_rate,
+            exchange_rate=data.exchange_rate if not is_overseas else None,  # 해외는 환율 불필요
             prctr=config.prctr,
             zzcon=bp_number,
             zzsconid=sales_contract,
@@ -359,9 +444,22 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                 "amount_krw": amount_krw,
             })
 
+        # 해외법인 별도 집계
+        if is_overseas:
+            overseas_slips.append({
+                "uid": uid,
+                "amount_usd": round(amount_usd, 2),
+                "currency": slip_currency,
+                "company_name": company.name if company else None,
+            })
+
     db.commit()
 
-    return {
+    # 내부비용 합계 계산
+    internal_cost_total_usd = sum(item["amount_usd"] for item in internal_cost_list)
+    internal_cost_total_krw = sum(item["amount_krw"] for item in internal_cost_list)
+
+    result = {
         "success": True,
         "batch_id": batch_id,
         "billing_cycle": data.billing_cycle,
@@ -372,6 +470,26 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         "slips_no_bp": len(slips_no_mapping),
         "no_mapping_details": slips_no_mapping[:20],  # 처음 20개만
     }
+
+    # 내부비용이 있는 경우 별도 표시
+    if internal_cost_list:
+        result["internal_cost"] = {
+            "count": len(internal_cost_list),
+            "total_usd": round(internal_cost_total_usd, 2),
+            "total_krw": internal_cost_total_krw,
+            "details": internal_cost_list[:20],  # 처음 20개만
+        }
+
+    # 해외법인이 있는 경우 별도 표시
+    if overseas_slips:
+        overseas_total_usd = sum(item["amount_usd"] for item in overseas_slips)
+        result["overseas"] = {
+            "count": len(overseas_slips),
+            "total_usd": round(overseas_total_usd, 2),
+            "details": overseas_slips[:20],  # 처음 20개만
+        }
+
+    return result
 
 
 # ===== 전표 조회 =====
