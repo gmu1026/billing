@@ -13,6 +13,7 @@ from app.api import (
     master,
     pro_rata,
     slip,
+    slip_template,
     split_billing,
 )
 from app.config import settings
@@ -54,6 +55,7 @@ app.include_router(contract_billing_profile.router)
 app.include_router(additional_charge.router)
 app.include_router(pro_rata.router)
 app.include_router(split_billing.router)
+app.include_router(slip_template.router)
 
 
 @app.get("/")

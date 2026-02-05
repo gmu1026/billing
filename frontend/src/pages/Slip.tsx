@@ -198,12 +198,6 @@ export default function Slip() {
     },
   });
 
-  // Create exchange rate
-  const createRateMutation = useMutation({
-    mutationFn: (rate: number) => slipApi.createExchangeRate({ rate, rate_date: documentDate }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['latestRate'] }),
-  });
-
   // Generate slips
   const generateMutation = useMutation({
     mutationFn: () =>

@@ -7,6 +7,7 @@ const navItems = [
   { path: '/billing', label: '빌링 데이터', icon: '📁' },
   { path: '/hb', label: 'HB 연동', icon: '🔗' },
   { path: '/slip', label: '전표 생성', icon: '📝' },
+  { path: '/slip-template', label: '전표 템플릿', icon: '📋' },
   { path: '/billing-profile', label: '청구/예치금', icon: '💰' },
   { path: '/master', label: '마스터 데이터', icon: '⚙️' },
 ];

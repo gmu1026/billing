@@ -6,6 +6,7 @@ import Import from './pages/Import';
 import Billing from './pages/Billing';
 import HB from './pages/HB';
 import Slip from './pages/Slip';
+import SlipTemplate from './pages/SlipTemplate';
 import Master from './pages/Master';
 import BillingProfile from './pages/BillingProfile';
 
@@ -29,6 +30,7 @@ export default function App() {
             <Route path="/billing" element={<Billing />} />
             <Route path="/hb" element={<HB />} />
             <Route path="/slip" element={<Slip />} />
+            <Route path="/slip-template" element={<SlipTemplate />} />
             <Route path="/master" element={<Master />} />
             <Route path="/billing-profile" element={<BillingProfile />} />
           </Routes>

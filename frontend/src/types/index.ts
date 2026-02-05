@@ -218,3 +218,42 @@ export interface SplitBillingRule {
   allocation_count: number;
   allocations: SplitBillingAllocation[];
 }
+
+// Slip Template
+export interface TemplateColumnDef {
+  index: number;
+  name: string;
+  header: string;
+  data_type: string;
+  sample_values: unknown[];
+}
+
+export interface SlipTemplateAnalysis {
+  slip_type: string;
+  columns: TemplateColumnDef[];
+  fixed_values: Record<string, unknown>;
+  account_mappings: Record<string, Record<string, string>>;
+  contract_pattern: Record<string, string> | null;
+  description_template: string | null;
+  row_count: number;
+}
+
+export interface SlipTemplate {
+  id: number;
+  name: string;
+  slip_type: string;
+  columns: TemplateColumnDef[];
+  fixed_values: Record<string, unknown>;
+  account_mappings: Record<string, Record<string, string>>;
+  contract_pattern: Record<string, string> | null;
+  description_template: string | null;
+  source_file: string | null;
+  is_active: boolean;
+}
+
+export interface TemplateFileInfo {
+  filename: string;
+  path: string;
+  size: number;
+  slip_type_guess: string | null;
+}

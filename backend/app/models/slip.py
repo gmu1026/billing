@@ -4,8 +4,9 @@
 
 from datetime import date, datetime
 from enum import Enum
+from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -196,5 +197,43 @@ class SlipConfig(Base):
         String(30), default="calendar_days"
     )  # 계산 방식: calendar_days (달력일수), business_days (영업일수)
 
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class SlipTemplate(Base):
+    """전표 템플릿 (양식 정의)"""
+
+    __tablename__ = "slip_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100))  # 템플릿명 (예: "매출전표양식")
+    slip_type: Mapped[str] = mapped_column(String(20), index=True)  # sales, billing, purchase
+
+    # 컬럼 구성 (순서 포함)
+    columns: Mapped[dict[str, Any]] = mapped_column(JSON)  # [{"name": "SEQNO", "header": "SEQNO", ...}, ...]
+
+    # 고정값 (벤더별로 다를 수 있으나 양식에서 추출한 기본값)
+    fixed_values: Mapped[dict[str, Any]] = mapped_column(JSON)  # {"BUKRS": "1100", "PRCTR": "10000003", ...}
+
+    # 계정 매핑 (국내/해외 등 조건별)
+    account_mappings: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # {
+    #   "domestic": {"receivable": "11060110", "revenue": "41021010"},
+    #   "overseas": {"receivable": "21120110", "revenue": "41021020"}
+    # }
+
+    # 계약번호 패턴
+    contract_pattern: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # {"sales": "매출ALI999", "purchase": "매입ALI999"}
+
+    # 전표적요 템플릿
+    description_template: Mapped[str | None] = mapped_column(String(200))
+    # "Alibaba Cloud {month}월 이용료"
+
+    # 원본 파일명 (참조용)
+    source_file: Mapped[str | None] = mapped_column(String(200))
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

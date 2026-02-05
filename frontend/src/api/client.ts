@@ -334,6 +334,68 @@ export const proRataApi = {
     api.get('/pro-rata/calculate', { params }),
 };
 
+// Slip Template
+export const slipTemplateApi = {
+  scanFiles: () => api.get('/slip/templates/scan-files'),
+  analyzeFile: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/slip/templates/analyze', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+  analyzePath: (filePath: string) =>
+    api.post('/slip/templates/analyze-path', null, { params: { file_path: filePath } }),
+  importFile: (file: File, name?: string) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/slip/templates/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: name ? { name } : undefined,
+    });
+  },
+  importPath: (filePath: string, name?: string) =>
+    api.post('/slip/templates/import-path', null, { params: { file_path: filePath, name } }),
+  getTemplates: (params?: { slip_type?: string; active_only?: boolean }) =>
+    api.get('/slip/templates/', { params }),
+  getTemplate: (id: number) => api.get(`/slip/templates/${id}`),
+  createTemplate: (data: {
+    name: string;
+    slip_type: string;
+    columns: Record<string, unknown>[];
+    fixed_values: Record<string, unknown>;
+    account_mappings: Record<string, Record<string, string>>;
+    contract_pattern?: Record<string, string>;
+    description_template?: string;
+    source_file?: string;
+  }) => api.post('/slip/templates/', data),
+  updateTemplate: (id: number, data: {
+    name?: string;
+    columns?: Record<string, unknown>[];
+    fixed_values?: Record<string, unknown>;
+    account_mappings?: Record<string, Record<string, string>>;
+    contract_pattern?: Record<string, string>;
+    description_template?: string;
+    is_active?: boolean;
+  }) => api.patch(`/slip/templates/${id}`, data),
+  deleteTemplate: (id: number) => api.delete(`/slip/templates/${id}`),
+  // Profile extraction
+  extractProfilesFile: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/slip/templates/extract-profiles', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+  extractProfilesPath: (filePath: string) =>
+    api.post('/slip/templates/extract-profiles-path', null, { params: { file_path: filePath } }),
+  applyProfiles: (data: {
+    profiles: Record<string, unknown>[];
+    vendor?: string;
+    overwrite?: boolean;
+  }) => api.post('/slip/templates/apply-profiles', data),
+};
+
 // Split Billing
 export const splitBillingApi = {
   getRules: (params?: { source_account_id?: string; source_contract_seq?: number; is_active?: boolean }) =>

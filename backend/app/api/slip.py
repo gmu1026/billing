@@ -18,23 +18,28 @@ def round_decimal(value: float, places: int = 2) -> float:
     return float(d.quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP))
 
 
-def apply_rounding(amount: float, rule: str) -> int:
+def apply_rounding(amount: float, rule: str, decimals: int = 0) -> int | float:
     """라운딩 규칙에 따른 금액 처리
 
     Args:
         amount: 원본 금액
         rule: 라운딩 규칙 (floor, round_half_up, ceiling)
+        decimals: 소수점 자릿수 (0=정수, 2=소수점2자리)
 
     Returns:
-        정수로 변환된 금액
+        라운딩된 금액 (decimals=0이면 int, 아니면 float)
     """
     d = Decimal(str(amount))
+    quantize_value = Decimal(10) ** -decimals  # 0이면 1, 2이면 0.01
+
     if rule == "ceiling":
-        return int(d.quantize(Decimal(1), rounding=ROUND_CEILING))
+        result = d.quantize(quantize_value, rounding=ROUND_CEILING)
     elif rule == "round_half_up":
-        return int(d.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        result = d.quantize(quantize_value, rounding=ROUND_HALF_UP)
     else:  # floor (default)
-        return int(d.quantize(Decimal(1), rounding=ROUND_DOWN))
+        result = d.quantize(quantize_value, rounding=ROUND_DOWN)
+
+    return int(result) if decimals == 0 else float(result)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -1012,8 +1017,8 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
         if is_overseas and company:
             # 해외법인: 통화금액(WRBTR)은 USD, 원화환산액(DMBTR_C)은 별도 계산
-            slip_currency = company.default_currency or "USD"
-            slip_amount = apply_rounding(amount_usd, rounding_rule)  # USD 금액 (라운딩 적용)
+            slip_currency = "USD"  # 해외법인은 무조건 USD
+            slip_amount = apply_rounding(amount_usd, rounding_rule, decimals=2)  # USD 금액 (소수점 2자리)
 
             # 원화환산액 계산 (월 1일자 basic_rate 사용)
             if overseas_exchange_rate and overseas_exchange_rate > 0:
@@ -1173,9 +1178,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                     target_is_overseas = target_company.is_overseas if target_company else False
                     if target_is_overseas:
                         final_amount_krw = apply_rounding(final_amount_usd * (overseas_exchange_rate or 1), effective_rounding_rule)
-                        final_slip_currency = target_company.default_currency if target_company else "USD"
+                        final_slip_currency = "USD"  # 해외법인은 무조건 USD
                         final_dmbtr_c = final_amount_krw
-                        final_wrbtr = apply_rounding(final_amount_usd, effective_rounding_rule)
+                        final_wrbtr = apply_rounding(final_amount_usd, effective_rounding_rule, decimals=2)  # 외화 소수점 2자리
                     else:
                         final_amount_krw = apply_rounding(final_amount_usd * (domestic_exchange_rate or 1), effective_rounding_rule)
                         final_slip_currency = "KRW"
@@ -1640,6 +1645,15 @@ def confirm_slips(batch_id: str, db: Session = Depends(get_db)):
 # ===== 전표 내보내기 =====
 
 
+def _format_amount(amount: float, currency: str) -> str | int:
+    """통화에 따른 금액 포맷팅 - KRW는 정수, 외화는 소수점 2자리"""
+    if currency == "KRW":
+        return int(amount)
+    else:
+        # 외화는 소수점 2자리까지 표시 (0.10, 0.01 등 유지)
+        return f"{amount:.2f}"
+
+
 def _export_sales_slip(slips: list[SlipRecord], db: Session) -> tuple[list, list]:
     """매출전표 양식 (22열 + 공백 + 검증용 2열)"""
     headers = [
@@ -1695,7 +1709,7 @@ def _export_sales_slip(slips: list[SlipRecord], db: Session) -> tuple[list, list
             slip.partner or "",
             slip.ar_account or "",
             slip.hkont or "",
-            int(slip.wrbtr) if slip.waers == "KRW" else round(slip.wrbtr, 2),
+            _format_amount(slip.wrbtr, slip.waers),
             dmbtr_c,  # DMBTR_C (해외법인 원화환산액)
             slip.prctr or "",
             slip.zzcon or "",
@@ -1769,7 +1783,7 @@ def _export_cost_slip(slips: list[SlipRecord], db: Session) -> tuple[list, list]
             slip.sgtxt or "",  # BKTXT (전표적요)
             slip.hkont or "",  # HKONT(원가계정)
             slip.ar_account or "",  # HKONT(상대계정)
-            int(slip.wrbtr) if slip.waers == "KRW" else round(slip.wrbtr, 2),
+            _format_amount(slip.wrbtr, slip.waers),
             dmbtr_c,  # DMBTR_C (해외법인 원화환산액)
             slip.prctr or "",  # KOSTL(코스트센터) - prctr 필드 사용
             slip.zzcon or "",
@@ -1839,7 +1853,7 @@ def _export_billing_slip(slips: list[SlipRecord], db: Session) -> tuple[list, li
         if slip.waers != "KRW" and slip.dmbtr_c:
             dmbtr_c = int(slip.dmbtr_c)
 
-        wrbtr_display = int(slip.wrbtr) if slip.waers == "KRW" else round(slip.wrbtr, 2)
+        wrbtr_display = _format_amount(slip.wrbtr, slip.waers)
 
         row = [
             slip.seqno,
