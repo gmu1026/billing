@@ -3,7 +3,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import alibaba, billing_profile, file_import, hb, master, slip
+from app.api import (
+    additional_charge,
+    alibaba,
+    billing_profile,
+    contract_billing_profile,
+    file_import,
+    hb,
+    master,
+    pro_rata,
+    slip,
+    split_billing,
+)
 from app.config import settings
 from app.database import Base, engine
 
@@ -39,6 +50,10 @@ app.include_router(hb.router)
 app.include_router(slip.router)
 app.include_router(file_import.router)
 app.include_router(billing_profile.router)
+app.include_router(contract_billing_profile.router)
+app.include_router(additional_charge.router)
+app.include_router(pro_rata.router)
+app.include_router(split_billing.router)
 
 
 @app.get("/")

@@ -169,6 +169,67 @@ export const billingProfileApi = {
   getDepositBalance: (profileId: number) => api.get(`/billing-profile/deposits/balance/${profileId}`),
 };
 
+// Contract Billing Profile
+export const contractBillingProfileApi = {
+  getProfiles: (params?: { company_seq?: number; contract_seq?: number; vendor?: string }) =>
+    api.get('/contract-billing-profile/', { params }),
+  getByCompany: (companySeq: number, vendor = 'alibaba') =>
+    api.get(`/contract-billing-profile/by-company/${companySeq}`, { params: { vendor } }),
+  getProfile: (id: number) => api.get(`/contract-billing-profile/${id}`),
+  createProfile: (data: {
+    contract_seq: number;
+    vendor: string;
+    payment_type?: string;
+    has_sales_agreement?: boolean;
+    has_purchase_agreement?: boolean;
+    currency?: string;
+    exchange_rate_type?: string;
+    custom_exchange_rate_date?: string;
+    hkont_sales?: string;
+    hkont_purchase?: string;
+    ar_account?: string;
+    ap_account?: string;
+    rounding_rule_override?: string;
+    note?: string;
+  }) => api.post('/contract-billing-profile/', data),
+  updateProfile: (id: number, data: {
+    payment_type?: string;
+    has_sales_agreement?: boolean;
+    has_purchase_agreement?: boolean;
+    currency?: string;
+    exchange_rate_type?: string;
+    custom_exchange_rate_date?: string;
+    hkont_sales?: string;
+    hkont_purchase?: string;
+    ar_account?: string;
+    ap_account?: string;
+    rounding_rule_override?: string;
+    note?: string;
+  }) => api.patch(`/contract-billing-profile/${id}`, data),
+  deleteProfile: (id: number) => api.delete(`/contract-billing-profile/${id}`),
+  // Deposits
+  getDeposits: (params?: { contract_profile_id?: number; contract_seq?: number; vendor?: string; include_exhausted?: boolean }) =>
+    api.get('/contract-billing-profile/deposits', { params }),
+  createDeposit: (data: {
+    contract_profile_id: number;
+    deposit_date: string;
+    amount: number;
+    currency?: string;
+    exchange_rate?: number;
+    reference?: string;
+    description?: string;
+  }) => api.post('/contract-billing-profile/deposits', data),
+  useDepositFifo: (params: {
+    contract_profile_id: number;
+    amount: number;
+    usage_date: string;
+    billing_cycle?: string;
+    uid?: string;
+    description?: string;
+  }) => api.post('/contract-billing-profile/deposits/use-fifo', null, { params }),
+  getDepositBalance: (contractProfileId: number) => api.get(`/contract-billing-profile/deposits/balance/${contractProfileId}`),
+};
+
 // Slip
 export const slipApi = {
   createExchangeRate: (data: { rate: number; rate_date: string }) =>
@@ -176,15 +237,31 @@ export const slipApi = {
   getExchangeRates: (params: { year_month?: string }) =>
     api.get('/slip/exchange-rates', { params }),
   getLatestRate: () => api.get('/slip/exchange-rates/latest'),
+  getRateByDate: (params: { rate_date: string; currency_from?: string }) =>
+    api.get('/slip/exchange-rates/by-date', { params }),
+  getFirstOfMonthRate: (params: { year_month: string; currency_from?: string }) =>
+    api.get('/slip/exchange-rates/first-of-month', { params }),
+  calculateRateDate: (params: {
+    vendor?: string;
+    slip_type: string;
+    document_date: string;
+    billing_cycle?: string;
+  }) => api.get('/slip/exchange-rates/calculate-date', { params }),
+  syncRatesFromHB: (data?: { limit?: number }) =>
+    api.post('/slip/exchange-rates/sync-hb', data || {}),
   getConfig: (vendor: string) => api.get(`/slip/config/${vendor}`),
-  updateConfig: (vendor: string, data: Record<string, string>) =>
+  updateConfig: (vendor: string, data: Record<string, string | boolean>) =>
     api.put(`/slip/config/${vendor}`, data),
   generate: (data: {
     billing_cycle: string;
     slip_type: 'sales' | 'purchase';
     document_date: string;
-    exchange_rate: number;
+    exchange_rate?: number;
     invoice_number?: string;
+    auto_exchange_rate?: boolean;
+    include_additional_charges?: boolean;
+    apply_pro_rata?: boolean;
+    apply_split_billing?: boolean;
   }) => api.post('/slip/generate', data),
   getSlips: (params: {
     batch_id?: string;
@@ -200,6 +277,106 @@ export const slipApi = {
   confirm: (batchId: string) => api.post(`/slip/confirm/${batchId}`),
   export: (batchId: string) => `/api/slip/export/${batchId}`,
   deleteBatch: (batchId: string) => api.delete(`/slip/batch/${batchId}`),
+};
+
+// Additional Charges
+export const additionalChargeApi = {
+  getCharges: (params?: { contract_seq?: number; charge_type?: string; is_active?: boolean }) =>
+    api.get('/additional-charges/', { params }),
+  getCharge: (id: number) => api.get(`/additional-charges/${id}`),
+  createCharge: (data: {
+    contract_seq: number;
+    name: string;
+    description?: string;
+    charge_type?: string;
+    amount: number;
+    currency?: string;
+    recurrence_type?: string;
+    start_date?: string;
+    end_date?: string;
+    applies_to_sales?: boolean;
+    applies_to_purchase?: boolean;
+  }) => api.post('/additional-charges/', data),
+  updateCharge: (id: number, data: {
+    name?: string;
+    description?: string;
+    charge_type?: string;
+    amount?: number;
+    currency?: string;
+    recurrence_type?: string;
+    start_date?: string;
+    end_date?: string;
+    applies_to_sales?: boolean;
+    applies_to_purchase?: boolean;
+    is_active?: boolean;
+  }) => api.patch(`/additional-charges/${id}`, data),
+  deleteCharge: (id: number) => api.delete(`/additional-charges/${id}`),
+  getByContract: (contractSeq: number, includeInactive = false) =>
+    api.get(`/additional-charges/by-contract/${contractSeq}`, { params: { include_inactive: includeInactive } }),
+};
+
+// Pro Rata
+export const proRataApi = {
+  getPeriods: (params?: { contract_seq?: number; billing_cycle?: string }) =>
+    api.get('/pro-rata/periods', { params }),
+  getPeriod: (id: number) => api.get(`/pro-rata/periods/${id}`),
+  createPeriod: (data: {
+    contract_seq: number;
+    billing_cycle: string;
+    start_day: number;
+    end_day: number;
+    note?: string;
+  }) => api.post('/pro-rata/periods', data),
+  updatePeriod: (id: number, data: { start_day?: number; end_day?: number; note?: string }) =>
+    api.patch(`/pro-rata/periods/${id}`, data),
+  deletePeriod: (id: number) => api.delete(`/pro-rata/periods/${id}`),
+  calculate: (params: { contract_seq: number; billing_cycle: string }) =>
+    api.get('/pro-rata/calculate', { params }),
+};
+
+// Split Billing
+export const splitBillingApi = {
+  getRules: (params?: { source_account_id?: string; source_contract_seq?: number; is_active?: boolean }) =>
+    api.get('/split-billing/rules', { params }),
+  getRule: (id: number) => api.get(`/split-billing/rules/${id}`),
+  createRule: (data: {
+    source_account_id: string;
+    source_contract_seq: number;
+    name?: string;
+    effective_from?: string;
+    effective_to?: string;
+    allocations: {
+      target_company_seq: number;
+      split_type?: string;
+      split_value: number;
+      priority?: number;
+      note?: string;
+    }[];
+  }) => api.post('/split-billing/rules', data),
+  updateRule: (id: number, data: {
+    name?: string;
+    effective_from?: string;
+    effective_to?: string;
+    is_active?: boolean;
+  }) => api.patch(`/split-billing/rules/${id}`, data),
+  deleteRule: (id: number) => api.delete(`/split-billing/rules/${id}`),
+  addAllocation: (ruleId: number, data: {
+    target_company_seq: number;
+    split_type?: string;
+    split_value: number;
+    priority?: number;
+    note?: string;
+  }) => api.post(`/split-billing/rules/${ruleId}/allocations`, data),
+  updateAllocation: (allocationId: number, data: {
+    target_company_seq?: number;
+    split_type?: string;
+    split_value?: number;
+    priority?: number;
+    note?: string;
+  }) => api.patch(`/split-billing/allocations/${allocationId}`, data),
+  deleteAllocation: (allocationId: number) => api.delete(`/split-billing/allocations/${allocationId}`),
+  simulate: (data: { source_account_id: string; amount_usd: number; billing_cycle: string }) =>
+    api.post('/split-billing/simulate', data),
 };
 
 export default api;

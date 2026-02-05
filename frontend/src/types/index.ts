@@ -125,7 +125,13 @@ export interface GenerateResponse {
   batch_id: string;
   billing_cycle: string;
   slip_type: string;
-  exchange_rate: number;
+  exchange_rate: {
+    domestic: number | null;
+    overseas: number | null;
+    rate_type: string;
+    rate_date: string;
+    synced_from_hb: boolean;
+  };
   total_slips: number;
   slips_with_bp: number;
   slips_no_bp: number;
@@ -136,5 +142,79 @@ export interface GenerateResponse {
     account_name: string | null;
     contract_name: string | null;
     company_name: string | null;
+    split?: boolean;
   }[];
+  additional_charges?: {
+    count: number;
+    total_usd: number;
+    total_krw: number;
+    details: {
+      charge_name: string;
+      charge_type: string;
+      amount_usd: number;
+      amount_krw: number;
+      company_name: string | null;
+    }[];
+  };
+}
+
+// Additional Charge
+export interface AdditionalCharge {
+  id: number;
+  contract_seq: number;
+  contract_name: string | null;
+  company_name: string | null;
+  name: string;
+  description: string | null;
+  charge_type: string;
+  amount: number;
+  currency: string;
+  recurrence_type: string;
+  start_date: string | null;
+  end_date: string | null;
+  applies_to_sales: boolean;
+  applies_to_purchase: boolean;
+  is_active: boolean;
+  created_at: string | null;
+}
+
+// Pro Rata
+export interface ProRataPeriod {
+  id: number;
+  contract_seq: number;
+  contract_name: string | null;
+  billing_cycle: string;
+  start_day: number;
+  end_day: number;
+  total_days: number;
+  active_days: number;
+  ratio: number;
+  is_manual: boolean;
+  note: string | null;
+}
+
+// Split Billing
+export interface SplitBillingAllocation {
+  id: number;
+  target_company_seq: number;
+  target_company_name: string | null;
+  target_company_bp: string | null;
+  split_type: string;
+  split_value: number;
+  priority: number;
+  note: string | null;
+}
+
+export interface SplitBillingRule {
+  id: number;
+  name: string | null;
+  source_account_id: string;
+  source_account_name: string | null;
+  source_contract_seq: number;
+  source_contract_name: string | null;
+  effective_from: string | null;
+  effective_to: string | null;
+  is_active: boolean;
+  allocation_count: number;
+  allocations: SplitBillingAllocation[];
 }

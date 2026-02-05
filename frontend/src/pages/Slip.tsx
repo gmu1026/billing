@@ -5,6 +5,46 @@ import { slipApi, masterApi } from '../api/client';
 import { Card, Button, Input, Select, Alert, Spinner, Badge, Table, Th, Td } from '../components/ui';
 import type { SlipRecord, SlipBatch, GenerateResponse, BPCode } from '../types';
 
+interface SlipConfig {
+  vendor: string;
+  bukrs: string;
+  prctr: string;
+  hkont_sales: string;
+  hkont_purchase: string;
+  ar_account_default: string;
+  ap_account_default: string;
+  zzref2: string;
+  sgtxt_template: string;
+  rounding_rule: string;
+  // 환율 규칙
+  exchange_rate_rule_sales: string;
+  exchange_rate_type_sales: string;
+  exchange_rate_rule_purchase: string;
+  exchange_rate_type_purchase: string;
+  exchange_rate_rule_overseas: string;
+  exchange_rate_type_overseas: string;
+}
+
+const EXCHANGE_RATE_RULES = [
+  { value: 'document_date', label: '증빙일' },
+  { value: 'first_of_document_month', label: '증빙월 1일' },
+  { value: 'first_of_billing_month', label: '정산월 1일' },
+  { value: 'last_of_prev_month', label: '전월 말일' },
+];
+
+const EXCHANGE_RATE_TYPES = [
+  { value: 'basic_rate', label: '기준환율' },
+  { value: 'send_rate', label: '송금환율' },
+  { value: 'buy_rate', label: '매입환율' },
+  { value: 'sell_rate', label: '매도환율' },
+];
+
+const ROUNDING_RULES = [
+  { value: 'floor', label: '버림 (FLOOR)' },
+  { value: 'round_half_up', label: '반올림 (ROUND_HALF_UP)' },
+  { value: 'ceiling', label: '올림 (CEILING)' },
+];
+
 export default function Slip() {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -29,17 +69,95 @@ export default function Slip() {
   const [editPartner, setEditPartner] = useState('');
   const [bpSearch, setBpSearch] = useState('');
 
-  // Latest exchange rate
-  const { data: latestRate } = useQuery({
-    queryKey: ['latestRate'],
-    queryFn: () => slipApi.getLatestRate().then((res) => res.data),
-  });
+  // Config
+  const [showConfig, setShowConfig] = useState(false);
 
+  // Exchange rate by date and slip type
+  const [rateLoading, setRateLoading] = useState(false);
+  const [rateDate, setRateDate] = useState(''); // 환율 적용일 (자동 계산됨)
+  const [rateDateRule, setRateDateRule] = useState(''); // 적용된 규칙
+  const [rateInfo, setRateInfo] = useState<{
+    rate: number;
+    rate_type: string;
+    rate_date: string;
+    source?: string;
+  } | null>(null);
+
+  // Fetch exchange rate when documentDate, slipType, or billingCycle changes
   useEffect(() => {
-    if (latestRate?.found && !exchangeRate) {
-      setExchangeRate(String(latestRate.rate));
-    }
-  }, [latestRate]);
+    const fetchRate = async () => {
+      if (!documentDate) return;
+
+      setRateLoading(true);
+      setRateInfo(null);
+      setRateDate('');
+      setRateDateRule('');
+
+      try {
+        // 벤더 설정에 따른 환율 적용일 및 환율 조회
+        const res = await slipApi.calculateRateDate({
+          vendor: 'alibaba',
+          slip_type: slipType,
+          document_date: documentDate,
+          billing_cycle: billingCycle,
+        });
+        const data = res.data;
+
+        setRateDate(data.rate_date);
+        setRateDateRule(data.rule);
+
+        if (data.found && data.rate) {
+          setExchangeRate(String(data.rate));
+          setRateInfo({
+            rate: data.rate,
+            rate_type: data.rate_type,
+            rate_date: data.rate_date,
+            source: data.source,
+          });
+        } else {
+          // 환율이 없으면 HB에서 동기화 시도
+          try {
+            const syncRes = await slipApi.syncRatesFromHB({ limit: 50 });
+            if (syncRes.data.success && (syncRes.data.imported > 0 || syncRes.data.updated > 0)) {
+              // 재조회
+              const retryRes = await slipApi.calculateRateDate({
+                vendor: 'alibaba',
+                slip_type: slipType,
+                document_date: documentDate,
+                billing_cycle: billingCycle,
+              });
+              if (retryRes.data.found && retryRes.data.rate) {
+                setExchangeRate(String(retryRes.data.rate));
+                setRateInfo({
+                  rate: retryRes.data.rate,
+                  rate_type: retryRes.data.rate_type,
+                  rate_date: retryRes.data.rate_date,
+                  source: 'hb (synced)',
+                });
+              } else {
+                setExchangeRate('');
+                setRateInfo(null);
+              }
+            } else {
+              setExchangeRate('');
+              setRateInfo(null);
+            }
+          } catch {
+            setExchangeRate('');
+            setRateInfo(null);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch exchange rate:', err);
+        setExchangeRate('');
+        setRateInfo(null);
+      } finally {
+        setRateLoading(false);
+      }
+    };
+
+    fetchRate();
+  }, [documentDate, slipType, billingCycle]);
 
   // Batches
   const { data: batches } = useQuery({
@@ -64,6 +182,22 @@ export default function Slip() {
     enabled: bpSearch.length >= 2,
   });
 
+  // Slip config
+  const { data: slipConfig, isLoading: configLoading } = useQuery({
+    queryKey: ['slipConfig', 'alibaba'],
+    queryFn: () => slipApi.getConfig('alibaba').then((res) => res.data as SlipConfig),
+    enabled: showConfig,
+  });
+
+  // Update config mutation
+  const updateConfigMutation = useMutation({
+    mutationFn: (data: Partial<SlipConfig>) => slipApi.updateConfig('alibaba', data as Record<string, string>),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['slipConfig'] });
+      alert('설정이 저장되었습니다.');
+    },
+  });
+
   // Create exchange rate
   const createRateMutation = useMutation({
     mutationFn: (rate: number) => slipApi.createExchangeRate({ rate, rate_date: documentDate }),
@@ -77,8 +211,9 @@ export default function Slip() {
         billing_cycle: billingCycle,
         slip_type: slipType,
         document_date: documentDate,
-        exchange_rate: Number(exchangeRate),
+        exchange_rate: exchangeRate ? Number(exchangeRate) : undefined,
         invoice_number: invoiceNumber || undefined,
+        auto_exchange_rate: true,
       }),
     onSuccess: (res) => {
       setGenerateResult(res.data);
@@ -128,12 +263,8 @@ export default function Slip() {
   });
 
   const handleGenerate = () => {
-    if (!exchangeRate || Number(exchangeRate) <= 0) {
-      alert('환율을 입력해주세요.');
-      return;
-    }
-    // Save exchange rate
-    createRateMutation.mutate(Number(exchangeRate));
+    // 환율 자동 조회가 활성화되어 있으므로 환율이 없어도 진행 가능
+    // 백엔드에서 자동으로 환율을 조회함
     generateMutation.mutate();
   };
 
@@ -151,11 +282,217 @@ export default function Slip() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold text-gray-800">전표 생성</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold text-gray-800">전표 생성</h2>
+        <button
+          onClick={() => setShowConfig(!showConfig)}
+          className="px-4 py-2 text-sm border rounded-lg hover:bg-gray-50"
+        >
+          {showConfig ? '설정 닫기' : '전표 설정'}
+        </button>
+      </div>
+
+      {/* Slip Config */}
+      {showConfig && (
+        <Card title="전표 설정 (Alibaba)">
+          {configLoading ? (
+            <div className="flex justify-center py-4"><Spinner /></div>
+          ) : slipConfig ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">라운딩 규칙</label>
+                  <select
+                    value={slipConfig.rounding_rule}
+                    onChange={(e) => updateConfigMutation.mutate({ rounding_rule: e.target.value })}
+                    className="w-full border rounded-lg px-3 py-2"
+                    disabled={updateConfigMutation.isPending}
+                  >
+                    {ROUNDING_RULES.map((rule) => (
+                      <option key={rule.value} value={rule.value}>
+                        {rule.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    USD → KRW 환산 시 적용되는 라운딩 규칙
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">회사코드 (BUKRS)</label>
+                  <input
+                    type="text"
+                    value={slipConfig.bukrs}
+                    onChange={(e) => updateConfigMutation.mutate({ bukrs: e.target.value })}
+                    className="w-full border rounded-lg px-3 py-2 bg-gray-50"
+                    readOnly
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">부서코드 (PRCTR)</label>
+                  <input
+                    type="text"
+                    value={slipConfig.prctr}
+                    onChange={(e) => updateConfigMutation.mutate({ prctr: e.target.value })}
+                    className="w-full border rounded-lg px-3 py-2 bg-gray-50"
+                    readOnly
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">매출 계정</label>
+                  <input
+                    type="text"
+                    value={slipConfig.hkont_sales}
+                    className="w-full border rounded-lg px-3 py-2 bg-gray-50"
+                    readOnly
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">매입 계정</label>
+                  <input
+                    type="text"
+                    value={slipConfig.hkont_purchase}
+                    className="w-full border rounded-lg px-3 py-2 bg-gray-50"
+                    readOnly
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">기본 채권과목</label>
+                  <input
+                    type="text"
+                    value={slipConfig.ar_account_default}
+                    className="w-full border rounded-lg px-3 py-2 bg-gray-50"
+                    readOnly
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">기본 채무과목</label>
+                  <input
+                    type="text"
+                    value={slipConfig.ap_account_default}
+                    className="w-full border rounded-lg px-3 py-2 bg-gray-50"
+                    readOnly
+                  />
+                </div>
+              </div>
+
+              {/* 환율 규칙 설정 */}
+              <div className="border-t pt-4 mt-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">환율 규칙</h4>
+                <div className="grid grid-cols-3 gap-4">
+                  {/* 매출 환율 규칙 */}
+                  <div className="p-3 bg-blue-50 rounded-lg">
+                    <h5 className="text-xs font-medium text-blue-700 mb-2">매출 전표</h5>
+                    <div className="space-y-2">
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">적용일 규칙</label>
+                        <select
+                          value={slipConfig.exchange_rate_rule_sales}
+                          onChange={(e) => updateConfigMutation.mutate({ exchange_rate_rule_sales: e.target.value })}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          disabled={updateConfigMutation.isPending}
+                        >
+                          {EXCHANGE_RATE_RULES.map((rule) => (
+                            <option key={rule.value} value={rule.value}>{rule.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">환율 종류</label>
+                        <select
+                          value={slipConfig.exchange_rate_type_sales}
+                          onChange={(e) => updateConfigMutation.mutate({ exchange_rate_type_sales: e.target.value })}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          disabled={updateConfigMutation.isPending}
+                        >
+                          {EXCHANGE_RATE_TYPES.map((type) => (
+                            <option key={type.value} value={type.value}>{type.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 매입 환율 규칙 */}
+                  <div className="p-3 bg-amber-50 rounded-lg">
+                    <h5 className="text-xs font-medium text-amber-700 mb-2">매입 전표</h5>
+                    <div className="space-y-2">
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">적용일 규칙</label>
+                        <select
+                          value={slipConfig.exchange_rate_rule_purchase}
+                          onChange={(e) => updateConfigMutation.mutate({ exchange_rate_rule_purchase: e.target.value })}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          disabled={updateConfigMutation.isPending}
+                        >
+                          {EXCHANGE_RATE_RULES.map((rule) => (
+                            <option key={rule.value} value={rule.value}>{rule.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">환율 종류</label>
+                        <select
+                          value={slipConfig.exchange_rate_type_purchase}
+                          onChange={(e) => updateConfigMutation.mutate({ exchange_rate_type_purchase: e.target.value })}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          disabled={updateConfigMutation.isPending}
+                        >
+                          {EXCHANGE_RATE_TYPES.map((type) => (
+                            <option key={type.value} value={type.value}>{type.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 해외법인 환율 규칙 */}
+                  <div className="p-3 bg-purple-50 rounded-lg">
+                    <h5 className="text-xs font-medium text-purple-700 mb-2">해외법인 (원화환산)</h5>
+                    <div className="space-y-2">
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">적용일 규칙</label>
+                        <select
+                          value={slipConfig.exchange_rate_rule_overseas}
+                          onChange={(e) => updateConfigMutation.mutate({ exchange_rate_rule_overseas: e.target.value })}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          disabled={updateConfigMutation.isPending}
+                        >
+                          {EXCHANGE_RATE_RULES.map((rule) => (
+                            <option key={rule.value} value={rule.value}>{rule.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">환율 종류</label>
+                        <select
+                          value={slipConfig.exchange_rate_type_overseas}
+                          onChange={(e) => updateConfigMutation.mutate({ exchange_rate_type_overseas: e.target.value })}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          disabled={updateConfigMutation.isPending}
+                        >
+                          {EXCHANGE_RATE_TYPES.map((type) => (
+                            <option key={type.value} value={type.value}>{type.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="text-xs text-gray-500">
+                회사코드, 계정코드 등 기타 설정은 시스템 관리자에게 문의하세요.
+              </div>
+            </div>
+          ) : null}
+        </Card>
+      )}
 
       {/* Generate Form */}
       <Card title="전표 생성">
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
           <Select
             label="정산월"
             value={billingCycle}
@@ -177,13 +514,64 @@ export default function Slip() {
             value={documentDate}
             onChange={(e) => setDocumentDate(e.target.value)}
           />
-          <Input
-            label="환율 (USD/KRW)"
-            type="number"
-            value={exchangeRate}
-            onChange={(e) => setExchangeRate(e.target.value)}
-            placeholder={latestRate?.found ? `최근: ${latestRate.rate}` : '환율 입력'}
-          />
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              환율 적용일
+              {rateLoading && <span className="ml-2 text-blue-500 text-xs">조회중...</span>}
+            </label>
+            <Input
+              type="date"
+              value={rateDate}
+              onChange={(e) => {
+                setRateDate(e.target.value);
+                // 수동 변경 시 해당 날짜로 환율 재조회
+                slipApi.getRateByDate({ rate_date: e.target.value }).then(res => {
+                  if (res.data.found) {
+                    const rate = slipType === 'sales'
+                      ? (res.data.send_rate || res.data.basic_rate)
+                      : res.data.basic_rate;
+                    if (rate) {
+                      setExchangeRate(String(rate));
+                      setRateInfo({
+                        rate,
+                        rate_type: slipType === 'sales' ? 'send_rate' : 'basic_rate',
+                        rate_date: res.data.rate_date,
+                        source: res.data.source,
+                      });
+                    }
+                  }
+                });
+              }}
+              disabled={rateLoading}
+            />
+            {rateDateRule && (
+              <p className="text-xs text-gray-500 mt-1">
+                {EXCHANGE_RATE_RULES.find(r => r.value === rateDateRule)?.label || rateDateRule}
+              </p>
+            )}
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              환율 (USD/KRW)
+            </label>
+            <Input
+              type="number"
+              value={exchangeRate}
+              onChange={(e) => setExchangeRate(e.target.value)}
+              placeholder="자동 조회"
+              disabled={rateLoading}
+            />
+            {rateInfo ? (
+              <p className="text-xs text-green-600 mt-1">
+                {EXCHANGE_RATE_TYPES.find(t => t.value === rateInfo.rate_type)?.label || rateInfo.rate_type}
+                {rateInfo.source?.includes('hb') && ' - HB'}
+              </p>
+            ) : !rateLoading && rateDate && !exchangeRate ? (
+              <p className="text-xs text-amber-600 mt-1">
+                {rateDate} 환율 없음
+              </p>
+            ) : null}
+          </div>
           <Input
             label="인보이스 번호"
             value={invoiceNumber}
@@ -207,6 +595,17 @@ export default function Slip() {
                 BP 매핑됨: {generateResult.slips_with_bp}건 /
                 미매핑: {generateResult.slips_no_bp}건
               </div>
+              {generateResult.exchange_rate && (
+                <div className="text-sm mt-1 text-gray-600">
+                  적용 환율: {generateResult.exchange_rate.domestic?.toLocaleString()} ({generateResult.exchange_rate.rate_type})
+                  {generateResult.exchange_rate.overseas && (
+                    <span className="ml-2">/ 해외: {generateResult.exchange_rate.overseas?.toLocaleString()}</span>
+                  )}
+                  {generateResult.exchange_rate.synced_from_hb && (
+                    <span className="ml-2 text-blue-500">(HB 동기화됨)</span>
+                  )}
+                </div>
+              )}
               {generateResult.slips_no_bp > 0 && (
                 <div className="text-sm mt-2">
                   미매핑 건은 아래 목록에서 수동으로 BP를 지정해주세요.

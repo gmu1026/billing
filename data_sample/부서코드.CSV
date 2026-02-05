@@ -1,5 +1,0 @@
-ID,활성화여부,회사 코드,조직코드외부번호,Source 시스템,부서명,조직(A10)코드,부서 Full pa,New 사업영역,사업 영역 명,사업 영역,사업 영역 명,코스트 센터 범주,코스트 센터 범주 명,배부기준,코스트 센터,코스트 센터 명,손익 센터,손익 센터 명
-,active,1100,7264883675A7863A,8279,China,S401000000,/4부문/China,BA04,4부문,BA04,4부문,C,PATH3공통,,10000003,China,10000003,China
-,active,1100,8268AA36BE458268,8278,Akamai,S201000000,/Akamai,BA90,기타부문,BA90,기타부문,B,PATH2공통,,10000019,Akamai,10000019,Akamai
-,active,1100,3EB4AA7B9824AB87,8280,Google Business,S202000000,/Google Business,BA90,기타부문,BA90,기타부문,B,PATH2공통,,10000023,Google Business,10000023,Google Business
-,active,1100,3EB86745A879E72A,8771,Integrated Solution Sales,C100000000,/Integrated Solution Sales,BA90,기타부문,BA90,기타부문,B,PATH2공통,,10000017,Integrated Solution Sales,10000017,Integrated Solution Sales

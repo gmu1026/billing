@@ -29,7 +29,7 @@ def round_decimal(value: float, places: int = 2) -> float:
 class BillingProfileCreate(BaseModel):
     company_seq: int
     vendor: str
-    payment_type: str = PaymentType.POSTPAID.value
+    payment_type: str = PaymentType.TAX_INVOICE.value
     has_sales_agreement: bool = False
     has_purchase_agreement: bool = False
     currency: str = "KRW"

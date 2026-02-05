@@ -4,16 +4,23 @@ HB (Hubble) 연동 데이터 모델
 관계:
 - Company (1) --- (*) Contract
 - Contract (*) --- (*) VendorAccount (through AccountContractMapping)
+- Contract (1) --- (*) ContractBillingProfile
 - Company (1) --- (0..1) BPCode (매핑)
 - VendorAccount.id = AlibabaBilling.user_id 또는 linked_user_id
 """
 
-from datetime import datetime
+from __future__ import annotations
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from datetime import date, datetime
+from typing import TYPE_CHECKING
+
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.billing_profile import AdditionalCharge, ContractBillingProfile, ProRataPeriod, SplitBillingRule
 
 
 class HBCompany(Base):
@@ -102,6 +109,10 @@ class HBContract(Base):
     sales_contract_code: Mapped[str | None] = mapped_column(String(30))  # 매출계약번호 (예: 매출ALI999)
     tax_invoice_month: Mapped[str | None] = mapped_column(String(20))  # next_month / current_month
 
+    # 계약 기간 (일할 계산용)
+    contract_start_date: Mapped[date | None] = mapped_column(Date)  # 계약 시작일
+    contract_end_date: Mapped[date | None] = mapped_column(Date)  # 계약 종료일
+
     # 상태
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_auto_reseller_margin: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -115,6 +126,18 @@ class HBContract(Base):
     # Relationships
     account_mappings: Mapped[list["AccountContractMapping"]] = relationship(
         "AccountContractMapping", back_populates="contract"
+    )
+    billing_profiles: Mapped[list["ContractBillingProfile"]] = relationship(
+        "ContractBillingProfile", back_populates="contract"
+    )
+    additional_charges: Mapped[list["AdditionalCharge"]] = relationship(
+        "AdditionalCharge", back_populates="contract"
+    )
+    split_rules: Mapped[list["SplitBillingRule"]] = relationship(
+        "SplitBillingRule", back_populates="source_contract"
+    )
+    pro_rata_periods: Mapped[list["ProRataPeriod"]] = relationship(
+        "ProRataPeriod", back_populates="contract"
     )
 
 
