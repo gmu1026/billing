@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.alibaba import AccountCode, BPCode, ContractCode, CostCenter, TaxCode
+from app.utils import decode_csv_content
 
 router = APIRouter(prefix="/api/master", tags=["master"])
 
@@ -28,7 +29,7 @@ async def upload_bp_codes(
 ):
     """BP Code 마스터 업로드 (BP_CODE.CSV)"""
     content = await file.read()
-    text = content.decode("utf-8-sig")
+    text = decode_csv_content(content)
 
     reader = csv.DictReader(io.StringIO(text))
     inserted = 0
@@ -154,7 +155,7 @@ async def upload_account_codes(
 ):
     """계정코드 마스터 업로드"""
     content = await file.read()
-    text = content.decode("utf-8-sig")
+    text = decode_csv_content(content)
 
     reader = csv.DictReader(io.StringIO(text))
     inserted = 0
@@ -225,7 +226,7 @@ async def upload_tax_codes(
 ):
     """세금코드 마스터 업로드"""
     content = await file.read()
-    text = content.decode("utf-8-sig")
+    text = decode_csv_content(content)
 
     reader = csv.DictReader(io.StringIO(text))
     inserted = 0
@@ -280,7 +281,7 @@ async def upload_cost_centers(
 ):
     """부서(코스트센터) 마스터 업로드"""
     content = await file.read()
-    text = content.decode("utf-8-sig")
+    text = decode_csv_content(content)
 
     reader = csv.DictReader(io.StringIO(text))
     inserted = 0
@@ -345,7 +346,7 @@ async def upload_contracts(
 ):
     """계약번호 마스터 업로드"""
     content = await file.read()
-    text = content.decode("utf-8-sig")
+    text = decode_csv_content(content)
 
     reader = csv.DictReader(io.StringIO(text))
     inserted = 0

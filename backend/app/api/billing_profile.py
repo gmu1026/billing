@@ -62,6 +62,15 @@ class DepositCreate(BaseModel):
     description: str | None = None
 
 
+class DepositUpdate(BaseModel):
+    deposit_date: date | None = None
+    amount: float | None = None
+    currency: str | None = None
+    exchange_rate: float | None = None
+    reference: str | None = None
+    description: str | None = None
+
+
 class DepositUsageCreate(BaseModel):
     deposit_id: int
     usage_date: date
@@ -84,7 +93,7 @@ def get_deposits(
     db: Session = Depends(get_db),
 ):
     """예치금 목록 조회"""
-    query = db.query(Deposit)
+    query = db.query(Deposit).filter(Deposit.profile_id.isnot(None))
 
     if profile_id:
         query = query.filter(Deposit.profile_id == profile_id)
@@ -123,6 +132,58 @@ def get_deposits(
         })
 
     return result
+
+
+@router.patch("/deposits/{deposit_id}")
+def update_deposit(deposit_id: int, data: DepositUpdate, db: Session = Depends(get_db)):
+    """예치금 수정"""
+    deposit = db.query(Deposit).filter(Deposit.id == deposit_id, Deposit.profile_id.isnot(None)).first()
+    if not deposit:
+        raise HTTPException(status_code=404, detail="Deposit not found")
+
+    if data.deposit_date is not None:
+        deposit.deposit_date = data.deposit_date
+    if data.currency is not None:
+        deposit.currency = data.currency
+    if data.exchange_rate is not None:
+        deposit.exchange_rate = data.exchange_rate
+    if data.reference is not None:
+        deposit.reference = data.reference
+    if data.description is not None:
+        deposit.description = data.description
+
+    # 금액 변경 시 잔액 비례 조정
+    if data.amount is not None and data.amount != deposit.amount:
+        diff = data.amount - deposit.amount
+        new_remaining = deposit.remaining_amount + diff
+        deposit.amount = data.amount
+        if new_remaining <= 0:
+            deposit.remaining_amount = 0
+            deposit.is_exhausted = True
+        else:
+            deposit.remaining_amount = new_remaining
+            deposit.is_exhausted = False
+
+    db.commit()
+    db.refresh(deposit)
+
+    profile = db.query(CompanyBillingProfile).filter(CompanyBillingProfile.id == deposit.profile_id).first()
+    company = db.query(HBCompany).filter(HBCompany.seq == profile.company_seq).first() if profile else None
+
+    return {
+        "id": deposit.id,
+        "profile_id": deposit.profile_id,
+        "company_name": company.name if company else None,
+        "vendor": profile.vendor if profile else None,
+        "deposit_date": str(deposit.deposit_date),
+        "amount": deposit.amount,
+        "currency": deposit.currency,
+        "exchange_rate": deposit.exchange_rate,
+        "remaining_amount": round_decimal(deposit.remaining_amount, 2),
+        "is_exhausted": deposit.is_exhausted,
+        "reference": deposit.reference,
+        "description": deposit.description,
+    }
 
 
 @router.post("/deposits")

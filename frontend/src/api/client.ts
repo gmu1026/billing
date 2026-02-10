@@ -150,6 +150,14 @@ export const billingProfileApi = {
     reference?: string;
     description?: string;
   }) => api.post('/billing-profile/deposits', data),
+  updateDeposit: (id: number, data: {
+    deposit_date?: string;
+    amount?: number;
+    currency?: string;
+    exchange_rate?: number;
+    reference?: string;
+    description?: string;
+  }) => api.patch(`/billing-profile/deposits/${id}`, data),
   useDeposit: (data: {
     deposit_id: number;
     usage_date: string;
@@ -219,6 +227,14 @@ export const contractBillingProfileApi = {
     reference?: string;
     description?: string;
   }) => api.post('/contract-billing-profile/deposits', data),
+  updateDeposit: (id: number, data: {
+    deposit_date?: string;
+    amount?: number;
+    currency?: string;
+    exchange_rate?: number;
+    reference?: string;
+    description?: string;
+  }) => api.patch(`/contract-billing-profile/deposits/${id}`, data),
   useDepositFifo: (params: {
     contract_profile_id: number;
     amount: number;

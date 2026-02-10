@@ -50,6 +50,8 @@ from app.models.alibaba import AlibabaBilling, BPCode
 from app.models.billing_profile import (
     CompanyBillingProfile,
     ContractBillingProfile,
+    Deposit,
+    DepositUsage,
     PAYMENT_TYPE_TAX_CODE,
 )
 from app.models.hb import AccountContractMapping, HBCompany, HBContract, HBVendorAccount
@@ -992,6 +994,25 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         if company:
             bp_number = company.bp_number
 
+        # BP 자동 매핑 (국내/해외 공통 - bp_number가 없는 경우)
+        if not bp_number and company:
+            if company.license:
+                matched_bp = db.query(BPCode).filter(
+                    BPCode.tax_number == company.license
+                ).first()
+                if matched_bp:
+                    bp_number = matched_bp.bp_number
+                    company.bp_number = bp_number
+
+            if not bp_number and company.name:
+                matched_bp = db.query(BPCode).filter(
+                    (BPCode.name_local == company.name) |
+                    (BPCode.name_english == company.name)
+                ).first()
+                if matched_bp:
+                    bp_number = matched_bp.bp_number
+                    company.bp_number = bp_number
+
         # 내부비용 체크
         is_internal = company.is_internal_cost if company else False
 
@@ -1027,30 +1048,6 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
             else:
                 slip_amount_krw = None  # 환율 없으면 원화환산액 없음
 
-            # 해외법인 BP 자동 매핑 (bp_number가 없는 경우)
-            if not bp_number:
-                # BPCode에서 국가코드로 시작하는 BP 검색 (예: CN, HK, ID 등)
-                # 회사명 또는 사업자번호로 매칭 시도
-                if company.license:
-                    # 사업자번호(license)로 BP 검색
-                    overseas_bp = db.query(BPCode).filter(
-                        BPCode.tax_number == company.license
-                    ).first()
-                    if overseas_bp:
-                        bp_number = overseas_bp.bp_number
-                        # 회사에 BP 매핑 저장
-                        company.bp_number = bp_number
-
-                if not bp_number and company.name:
-                    # 회사명으로 BP 검색 (영문명 또는 로컬명)
-                    overseas_bp = db.query(BPCode).filter(
-                        (BPCode.name_local == company.name) |
-                        (BPCode.name_english == company.name)
-                    ).first()
-                    if overseas_bp:
-                        bp_number = overseas_bp.bp_number
-                        company.bp_number = bp_number
-
         # 청구 프로필 조회 (우선순위: 계약별 > 회사별)
         contract_billing_profile = None
         company_billing_profile = None
@@ -1083,6 +1080,60 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
         # 유효한 청구 프로필 (계약별 우선)
         billing_profile = contract_billing_profile or company_billing_profile
+
+        # 해외 예치금 FIFO 환율 적용
+        # 계약별 청구 프로필이 있고, 해외법인(non-KRW)이고, USD 금액이 있는 경우
+        if is_overseas and contract_billing_profile and amount_usd > 0:
+            available_deposits = (
+                db.query(Deposit)
+                .filter(
+                    Deposit.contract_profile_id == contract_billing_profile.id,
+                    Deposit.is_exhausted == False,
+                    Deposit.currency != "KRW",
+                )
+                .order_by(Deposit.deposit_date)
+                .all()
+            )
+
+            if available_deposits:
+                remaining_usd = amount_usd
+                fifo_krw = 0.0
+
+                for dep in available_deposits:
+                    if remaining_usd <= 0:
+                        break
+
+                    use = min(remaining_usd, dep.remaining_amount)
+                    rate = dep.exchange_rate if dep.exchange_rate else (overseas_exchange_rate or 0)
+                    portion_krw = float(apply_rounding(use * rate, effective_rounding_rule))
+                    fifo_krw += portion_krw
+
+                    # 잔액 차감 및 소진 처리
+                    dep.remaining_amount -= use
+                    if dep.remaining_amount <= 0:
+                        dep.remaining_amount = 0
+                        dep.is_exhausted = True
+
+                    # 사용 기록 생성 (배치 ID 연결)
+                    db.add(DepositUsage(
+                        deposit_id=dep.id,
+                        usage_date=data.document_date,
+                        amount=use,
+                        amount_krw=int(portion_krw),
+                        billing_cycle=data.billing_cycle,
+                        slip_batch_id=batch_id,
+                        uid=uid,
+                        description=f"전표 생성 ({data.billing_cycle})",
+                    ))
+
+                    remaining_usd -= use
+
+                # 예치금 부족분은 현재 환율로 원화 환산
+                if remaining_usd > 0:
+                    fallback_rate = overseas_exchange_rate or 0
+                    fifo_krw += float(apply_rounding(remaining_usd * fallback_rate, effective_rounding_rule))
+
+                slip_amount_krw = int(fifo_krw)
 
         # 계정코드 결정 (우선순위: 청구프로필 > BP코드 > 해외법인수출 > 기본값)
         ar_account = config.ar_account_default if data.slip_type == "sales" else config.ap_account_default
@@ -1956,6 +2007,15 @@ def delete_batch(batch_id: str, db: Session = Depends(get_db)):
             status_code=400,
             detail=f"Cannot delete: {len(confirmed)} slips are confirmed",
         )
+
+    # 예치금 사용 기록 복원 (이 배치로 차감된 예치금 되돌리기)
+    usages = db.query(DepositUsage).filter(DepositUsage.slip_batch_id == batch_id).all()
+    for usage in usages:
+        dep = db.query(Deposit).filter(Deposit.id == usage.deposit_id).first()
+        if dep:
+            dep.remaining_amount += usage.amount
+            dep.is_exhausted = False
+        db.delete(usage)
 
     count = len(slips)
     for slip in slips:

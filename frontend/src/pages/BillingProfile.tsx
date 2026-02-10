@@ -63,8 +63,10 @@ interface ContractWithProfile {
 
 interface Deposit {
   id: number;
-  profile_id: number;
-  company_name: string;
+  profile_id: number | null;
+  contract_profile_id: number | null;
+  contract_name: string | null;
+  company_name: string | null;
   vendor: string;
   deposit_date: string;
   amount: number;
@@ -159,8 +161,19 @@ export default function BillingProfile() {
   });
 
   const [depositFormData, setDepositFormData] = useState({
+    profileType: 'contract' as 'company' | 'contract',
     profile_id: '',
     deposit_date: new Date().toISOString().slice(0, 10),
+    amount: '',
+    currency: 'KRW',
+    exchange_rate: '',
+    reference: '',
+    description: '',
+  });
+
+  const [editingDeposit, setEditingDeposit] = useState<Deposit | null>(null);
+  const [editDepositFormData, setEditDepositFormData] = useState({
+    deposit_date: '',
     amount: '',
     currency: 'KRW',
     exchange_rate: '',
@@ -172,13 +185,13 @@ export default function BillingProfile() {
   const { data: profiles, isLoading: profilesLoading } = useQuery({
     queryKey: ['billingProfiles'],
     queryFn: () => billingProfileApi.getProfiles().then((res) => res.data as BillingProfile[]),
-    enabled: activeTab === 'companies',
+    enabled: activeTab === 'companies' || activeTab === 'deposits',
   });
 
   const { data: contractProfiles, isLoading: contractProfilesLoading } = useQuery({
     queryKey: ['contractBillingProfiles'],
     queryFn: () => contractBillingProfileApi.getProfiles().then((res) => res.data as ContractProfile[]),
-    enabled: activeTab === 'contracts',
+    enabled: activeTab === 'contracts' || activeTab === 'deposits',
   });
 
   const { data: contractsWithProfiles, isLoading: contractsLoading } = useQuery({
@@ -190,11 +203,24 @@ export default function BillingProfile() {
     enabled: activeTab === 'contracts' && !!selectedCompanySeq,
   });
 
-  const { data: deposits, isLoading: depositsLoading } = useQuery({
-    queryKey: ['deposits'],
+  const { data: companyDeposits, isLoading: companyDepositsLoading } = useQuery({
+    queryKey: ['companyDeposits'],
     queryFn: () => billingProfileApi.getDeposits({ include_exhausted: true }).then((res) => res.data as Deposit[]),
     enabled: activeTab === 'deposits',
+    staleTime: 0,
   });
+
+  const { data: contractDeposits, isLoading: contractDepositsLoading } = useQuery({
+    queryKey: ['contractDeposits'],
+    queryFn: () => contractBillingProfileApi.getDeposits({ include_exhausted: true }).then((res) => res.data as Deposit[]),
+    enabled: activeTab === 'deposits',
+    staleTime: 0,
+  });
+
+  const deposits = [...(companyDeposits ?? []), ...(contractDeposits ?? [])].sort(
+    (a, b) => a.deposit_date.localeCompare(b.deposit_date)
+  );
+  const depositsLoading = companyDepositsLoading || contractDepositsLoading;
 
   const { data: companies } = useQuery({
     queryKey: ['hbCompanies'],
@@ -336,21 +362,58 @@ export default function BillingProfile() {
   });
 
   const createDeposit = useMutation({
-    mutationFn: (data: typeof depositFormData) =>
-      billingProfileApi.createDeposit({
-        profile_id: parseInt(data.profile_id),
+    mutationFn: (data: typeof depositFormData) => {
+      const payload = {
         deposit_date: data.deposit_date,
         amount: parseFloat(data.amount),
         currency: data.currency,
         exchange_rate: data.exchange_rate ? parseFloat(data.exchange_rate) : undefined,
         reference: data.reference || undefined,
         description: data.description || undefined,
-      }),
+      };
+      if (data.profileType === 'contract') {
+        return contractBillingProfileApi.createDeposit({
+          contract_profile_id: parseInt(data.profile_id),
+          ...payload,
+        });
+      }
+      return billingProfileApi.createDeposit({
+        profile_id: parseInt(data.profile_id),
+        ...payload,
+      });
+    },
     onSuccess: () => {
       setMessage({ type: 'success', text: '예치금이 등록되었습니다.' });
       setShowDepositForm(false);
       resetDepositForm();
-      queryClient.invalidateQueries({ queryKey: ['deposits'] });
+      queryClient.invalidateQueries({ queryKey: ['companyDeposits'] });
+      queryClient.invalidateQueries({ queryKey: ['contractDeposits'] });
+    },
+  });
+
+  const updateDeposit = useMutation({
+    mutationFn: ({ deposit, data }: { deposit: Deposit; data: typeof editDepositFormData }) => {
+      const payload = {
+        deposit_date: data.deposit_date,
+        amount: data.amount ? parseFloat(data.amount) : undefined,
+        currency: data.currency,
+        exchange_rate: data.exchange_rate ? parseFloat(data.exchange_rate) : undefined,
+        reference: data.reference || undefined,
+        description: data.description || undefined,
+      };
+      if (deposit.contract_profile_id) {
+        return contractBillingProfileApi.updateDeposit(deposit.id, payload);
+      }
+      return billingProfileApi.updateDeposit(deposit.id, payload);
+    },
+    onSuccess: () => {
+      setMessage({ type: 'success', text: '예치금이 수정되었습니다.' });
+      setEditingDeposit(null);
+      queryClient.invalidateQueries({ queryKey: ['companyDeposits'] });
+      queryClient.invalidateQueries({ queryKey: ['contractDeposits'] });
+    },
+    onError: () => {
+      setMessage({ type: 'error', text: '예치금 수정에 실패했습니다.' });
     },
   });
 
@@ -391,6 +454,7 @@ export default function BillingProfile() {
 
   const resetDepositForm = () => {
     setDepositFormData({
+      profileType: 'contract',
       profile_id: '',
       deposit_date: new Date().toISOString().slice(0, 10),
       amount: '',
@@ -473,6 +537,24 @@ export default function BillingProfile() {
   const handleDepositSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     createDeposit.mutate(depositFormData);
+  };
+
+  const handleEditDeposit = (deposit: Deposit) => {
+    setEditingDeposit(deposit);
+    setEditDepositFormData({
+      deposit_date: deposit.deposit_date,
+      amount: deposit.amount.toString(),
+      currency: deposit.currency,
+      exchange_rate: deposit.exchange_rate?.toString() ?? '',
+      reference: deposit.reference ?? '',
+      description: deposit.description ?? '',
+    });
+  };
+
+  const handleEditDepositSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDeposit) return;
+    updateDeposit.mutate({ deposit: editingDeposit, data: editDepositFormData });
   };
 
   const tabs = [
@@ -988,6 +1070,23 @@ export default function BillingProfile() {
           <form onSubmit={handleDepositSubmit} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">프로필 유형</label>
+                <select
+                  value={depositFormData.profileType}
+                  onChange={(e) =>
+                    setDepositFormData({
+                      ...depositFormData,
+                      profileType: e.target.value as 'company' | 'contract',
+                      profile_id: '',
+                    })
+                  }
+                  className="w-full border rounded-lg px-3 py-2"
+                >
+                  <option value="contract">계약별 프로필</option>
+                  <option value="company">회사별 프로필 (레거시)</option>
+                </select>
+              </div>
+              <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">청구 프로필</label>
                 <select
                   value={depositFormData.profile_id}
@@ -996,11 +1095,17 @@ export default function BillingProfile() {
                   required
                 >
                   <option value="">선택...</option>
-                  {profiles?.map((p) => (
-                    <option key={p.id} value={p.id.toString()}>
-                      {p.company_name} ({p.vendor})
-                    </option>
-                  ))}
+                  {depositFormData.profileType === 'contract'
+                    ? contractProfiles?.map((p) => (
+                        <option key={p.id} value={p.id.toString()}>
+                          {p.company_name} - {p.contract_name} ({p.vendor})
+                        </option>
+                      ))
+                    : profiles?.map((p) => (
+                        <option key={p.id} value={p.id.toString()}>
+                          {p.company_name} ({p.vendor})
+                        </option>
+                      ))}
                 </select>
               </div>
               <Input
@@ -1377,58 +1482,152 @@ export default function BillingProfile() {
 
       {/* Deposits Tab */}
       {activeTab === 'deposits' && (
-        <Card title="예치금 내역">
-          {depositsLoading ? (
-            <div className="flex justify-center py-8">
-              <Spinner />
-            </div>
-          ) : deposits && deposits.length > 0 ? (
-            <Table>
-              <thead>
-                <tr>
-                  <Th>회사명</Th>
-                  <Th>충전일</Th>
-                  <Th>충전액</Th>
-                  <Th>통화</Th>
-                  <Th>환율</Th>
-                  <Th>잔액</Th>
-                  <Th>상태</Th>
-                  <Th>참조</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {deposits.map((deposit) => (
-                  <tr key={deposit.id} className={deposit.is_exhausted ? 'bg-gray-50' : ''}>
-                    <Td>{deposit.company_name}</Td>
-                    <Td>{deposit.deposit_date}</Td>
-                    <Td className="text-right font-mono">
-                      {deposit.amount.toLocaleString()}
-                    </Td>
-                    <Td>{deposit.currency}</Td>
-                    <Td>{deposit.exchange_rate?.toLocaleString() || '-'}</Td>
-                    <Td className="text-right font-mono">
-                      {deposit.remaining_amount.toLocaleString()}
-                    </Td>
-                    <Td>
-                      <span
-                        className={`px-2 py-1 rounded text-xs ${
-                          deposit.is_exhausted
-                            ? 'bg-gray-100 text-gray-600'
-                            : 'bg-green-100 text-green-800'
-                        }`}
-                      >
-                        {deposit.is_exhausted ? '소진' : '사용가능'}
-                      </span>
-                    </Td>
-                    <Td className="text-sm text-gray-500">{deposit.reference || '-'}</Td>
+        <>
+          <Card title="예치금 내역">
+            {depositsLoading ? (
+              <div className="flex justify-center py-8">
+                <Spinner />
+              </div>
+            ) : deposits && deposits.length > 0 ? (
+              <Table>
+                <thead>
+                  <tr>
+                    <Th>회사명</Th>
+                    <Th>계약명</Th>
+                    <Th>충전일</Th>
+                    <Th>충전액</Th>
+                    <Th>통화</Th>
+                    <Th>환율</Th>
+                    <Th>잔액</Th>
+                    <Th>상태</Th>
+                    <Th>참조</Th>
+                    <Th></Th>
                   </tr>
-                ))}
-              </tbody>
-            </Table>
-          ) : (
-            <p className="text-gray-500 text-center py-8">등록된 예치금이 없습니다.</p>
+                </thead>
+                <tbody>
+                  {deposits.map((deposit) => (
+                    <tr key={deposit.id} className={deposit.is_exhausted ? 'bg-gray-50' : ''}>
+                      <Td>{deposit.company_name || '-'}</Td>
+                      <Td className="text-sm text-gray-500">{deposit.contract_name || '-'}</Td>
+                      <Td>{deposit.deposit_date}</Td>
+                      <Td className="text-right font-mono">
+                        {deposit.amount.toLocaleString()}
+                      </Td>
+                      <Td>{deposit.currency}</Td>
+                      <Td>{deposit.exchange_rate?.toLocaleString() || '-'}</Td>
+                      <Td className="text-right font-mono">
+                        {deposit.remaining_amount.toLocaleString()}
+                      </Td>
+                      <Td>
+                        <span
+                          className={`px-2 py-1 rounded text-xs ${
+                            deposit.is_exhausted
+                              ? 'bg-gray-100 text-gray-600'
+                              : 'bg-green-100 text-green-800'
+                          }`}
+                        >
+                          {deposit.is_exhausted ? '소진' : '사용가능'}
+                        </span>
+                      </Td>
+                      <Td className="text-sm text-gray-500">{deposit.reference || '-'}</Td>
+                      <Td>
+                        <button
+                          onClick={() => handleEditDeposit(deposit)}
+                          className="text-blue-600 hover:text-blue-800 text-sm"
+                        >
+                          수정
+                        </button>
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            ) : (
+              <p className="text-gray-500 text-center py-8">등록된 예치금이 없습니다.</p>
+            )}
+          </Card>
+
+          {/* 예치금 수정 모달 */}
+          {editingDeposit && (
+            <Card title="예치금 수정">
+              <div className="mb-3 text-sm text-gray-600">
+                <span className="font-medium">{editingDeposit.company_name}</span>
+                {editingDeposit.contract_name && (
+                  <span className="ml-2 text-gray-400">/ {editingDeposit.contract_name}</span>
+                )}
+              </div>
+              <form onSubmit={handleEditDepositSubmit} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <Input
+                    label="충전일"
+                    type="date"
+                    value={editDepositFormData.deposit_date}
+                    onChange={(e) => setEditDepositFormData({ ...editDepositFormData, deposit_date: e.target.value })}
+                    required
+                  />
+                  <Input
+                    label="충전 금액"
+                    type="number"
+                    value={editDepositFormData.amount}
+                    onChange={(e) => setEditDepositFormData({ ...editDepositFormData, amount: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">통화</label>
+                    <select
+                      value={editDepositFormData.currency}
+                      onChange={(e) => setEditDepositFormData({ ...editDepositFormData, currency: e.target.value })}
+                      className="w-full border rounded-lg px-3 py-2"
+                    >
+                      <option value="KRW">KRW</option>
+                      <option value="USD">USD</option>
+                      <option value="CNY">CNY</option>
+                      <option value="JPY">JPY</option>
+                      <option value="SGD">SGD</option>
+                    </select>
+                  </div>
+                  <Input
+                    label="환율 (해외용)"
+                    type="number"
+                    step="0.01"
+                    value={editDepositFormData.exchange_rate}
+                    onChange={(e) => setEditDepositFormData({ ...editDepositFormData, exchange_rate: e.target.value })}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <Input
+                    label="참조번호"
+                    value={editDepositFormData.reference}
+                    onChange={(e) => setEditDepositFormData({ ...editDepositFormData, reference: e.target.value })}
+                  />
+                  <Input
+                    label="설명"
+                    value={editDepositFormData.description}
+                    onChange={(e) => setEditDepositFormData({ ...editDepositFormData, description: e.target.value })}
+                  />
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setEditingDeposit(null)}
+                    className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                    disabled={updateDeposit.isPending}
+                  >
+                    저장
+                  </button>
+                </div>
+              </form>
+            </Card>
           )}
-        </Card>
+        </>
       )}
     </div>
   );

@@ -4,6 +4,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+from app.utils import decode_csv_content
 
 
 def round_decimal(value: float, places: int = 2) -> float:
@@ -51,7 +52,7 @@ async def upload_alibaba_billing(
     - reseller: Original Cost - Discount - SPN Deducted Price 사용 (쿠폰 이슈 대응)
     """
     content = await file.read()
-    text = content.decode("utf-8-sig")
+    text = decode_csv_content(content)
 
     reader = csv.DictReader(io.StringIO(text))
 
