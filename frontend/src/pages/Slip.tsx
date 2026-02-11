@@ -72,6 +72,9 @@ export default function Slip() {
   // Config
   const [showConfig, setShowConfig] = useState(false);
 
+  // Overseas exchange rate (해외 인보이스 환율)
+  const [overseasExchangeRate, setOverseasExchangeRate] = useState('');
+
   // Exchange rate by date and slip type
   const [rateLoading, setRateLoading] = useState(false);
   const [rateDate, setRateDate] = useState(''); // 환율 적용일 (자동 계산됨)
@@ -208,6 +211,7 @@ export default function Slip() {
         exchange_rate: exchangeRate ? Number(exchangeRate) : undefined,
         invoice_number: invoiceNumber || undefined,
         auto_exchange_rate: true,
+        overseas_exchange_rate_input: overseasExchangeRate ? Number(overseasExchangeRate) : undefined,
       }),
     onSuccess: (res) => {
       setGenerateResult(res.data);
@@ -486,7 +490,7 @@ export default function Slip() {
 
       {/* Generate Form */}
       <Card title="전표 생성">
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-7 gap-4">
           <Select
             label="정산월"
             value={billingCycle}
@@ -565,6 +569,20 @@ export default function Slip() {
                 {rateDate} 환율 없음
               </p>
             ) : null}
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              해외 인보이스 환율
+            </label>
+            <Input
+              type="number"
+              value={overseasExchangeRate}
+              onChange={(e) => setOverseasExchangeRate(e.target.value)}
+              placeholder="미입력 시 자동"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              계약별 환율 미설정 시 적용
+            </p>
           </div>
           <Input
             label="인보이스 번호"

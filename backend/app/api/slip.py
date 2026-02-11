@@ -5,7 +5,7 @@
 import csv
 import io
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -721,6 +721,7 @@ class SlipGenerateRequest(BaseModel):
     include_additional_charges: bool = True  # 추가 비용 포함 여부
     apply_pro_rata: bool = True  # 일할 계산 적용 여부
     apply_split_billing: bool = True  # 분할 청구 적용 여부
+    overseas_exchange_rate_input: float | None = None  # 해외 인보이스 기본 환율 (계약별 설정 없을 때 사용)
 
 
 @router.post("/generate")
@@ -916,18 +917,10 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         applied_exchange_rate = domestic_exchange_rate  # 적용된 환율
 
         if is_overseas and company:
-            # 해외법인: 통화금액(WRBTR)은 USD, 원화환산액(DMBTR_C)은 별도 계산
+            # 해외법인: 통화금액(WRBTR)은 USD, 원화환산액(DMBTR_C)은 계약별 환율 결정 후 계산
             slip_currency = "USD"  # 해외법인은 무조건 USD
-            slip_amount = apply_rounding(
-                amount_usd, rounding_rule, decimals=2
-            )  # USD 금액 (소수점 2자리)
-
-            # 원화환산액 계산 (월 1일자 basic_rate 사용)
-            if overseas_exchange_rate and overseas_exchange_rate > 0:
-                slip_amount_krw = apply_rounding(amount_usd * overseas_exchange_rate, rounding_rule)
-                applied_exchange_rate = overseas_exchange_rate
-            else:
-                slip_amount_krw = None  # 환율 없으면 원화환산액 없음
+            slip_amount = apply_rounding(amount_usd, rounding_rule, decimals=2)  # USD 금액 (소수점 2자리)
+            slip_amount_krw = None  # 원화환산액은 청구 프로필 로딩 후 계산
 
         # 청구 프로필 조회 (우선순위: 계약별 > 회사별)
         contract_billing_profile = None
@@ -962,6 +955,63 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         # 유효한 청구 프로필 (계약별 우선)
         billing_profile = contract_billing_profile or company_billing_profile
 
+        # 해외법인 계약별 환율 결정
+        # 우선순위: 1) 계약별 프로필 환율 설정 → 2) 슬립 생성 시 지정 해외 환율 → 3) 글로벌 해외 환율
+        if is_overseas:
+            effective_overseas_rate = None  # 아직 미결정
+
+            # 1. 계약별 청구 프로필 환율 설정 확인
+            if contract_billing_profile and (
+                contract_billing_profile.exchange_rate_type or contract_billing_profile.custom_exchange_rate_date
+            ):
+                rate_lookup_date = contract_billing_profile.custom_exchange_rate_date
+                if not rate_lookup_date and contract_billing_profile.exchange_rate_type:
+                    rule = contract_billing_profile.exchange_rate_type
+                    if rule == "document_date":
+                        rate_lookup_date = data.document_date
+                    elif rule == "first_of_document_month":
+                        rate_lookup_date = data.document_date.replace(day=1)
+                    elif rule == "first_of_billing_month":
+                        year = int(data.billing_cycle[:4])
+                        month = int(data.billing_cycle[4:6])
+                        rate_lookup_date = date(year, month, 1)
+                    elif rule == "last_of_prev_month":
+                        rate_lookup_date = data.document_date.replace(day=1) - timedelta(days=1)
+                    else:
+                        rate_lookup_date = data.document_date
+
+                if rate_lookup_date:
+                    contract_rate_record = (
+                        db.query(ExchangeRate)
+                        .filter(
+                            ExchangeRate.rate_date == rate_lookup_date,
+                            ExchangeRate.currency_from == "USD",
+                            ExchangeRate.currency_to == "KRW",
+                        )
+                        .first()
+                    )
+                    if contract_rate_record:
+                        rate_val = contract_rate_record.basic_rate or contract_rate_record.rate
+                        if rate_val:
+                            effective_overseas_rate = float(rate_val)
+
+            # 2. 계약별 환율 없으면 슬립 생성 시 지정한 해외 환율 사용
+            if effective_overseas_rate is None and data.overseas_exchange_rate_input:
+                effective_overseas_rate = data.overseas_exchange_rate_input
+
+            # 3. 그것도 없으면 글로벌 해외 환율 사용
+            if effective_overseas_rate is None:
+                effective_overseas_rate = overseas_exchange_rate
+
+            # 원화환산액 계산 (effective_overseas_rate 사용)
+            if effective_overseas_rate and effective_overseas_rate > 0:
+                slip_amount_krw = apply_rounding(amount_usd * effective_overseas_rate, effective_rounding_rule)
+                applied_exchange_rate = effective_overseas_rate
+            else:
+                slip_amount_krw = None  # 환율 없으면 원화환산액 없음
+        else:
+            effective_overseas_rate = overseas_exchange_rate  # 국내는 해외 환율 불필요
+
         # 해외 예치금 FIFO 환율 적용
         # 계약별 청구 프로필이 있고, 해외법인(non-KRW)이고, USD 금액이 있는 경우
         if is_overseas and contract_billing_profile and amount_usd > 0:
@@ -985,7 +1035,7 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         break
 
                     use = min(remaining_usd, dep.remaining_amount)
-                    rate = dep.exchange_rate if dep.exchange_rate else (overseas_exchange_rate or 0)
+                    rate = dep.exchange_rate if dep.exchange_rate else (effective_overseas_rate or 0)
                     portion_krw = float(apply_rounding(use * rate, effective_rounding_rule))
                     fifo_krw += portion_krw
 
@@ -1011,9 +1061,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
                     remaining_usd -= use
 
-                # 예치금 부족분은 현재 환율로 원화 환산
+                # 예치금 부족분은 계약별 유효 환율로 원화 환산
                 if remaining_usd > 0:
-                    fallback_rate = overseas_exchange_rate or 0
+                    fallback_rate = effective_overseas_rate or 0
                     fifo_krw += float(
                         apply_rounding(remaining_usd * fallback_rate, effective_rounding_rule)
                     )
@@ -1121,7 +1171,7 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                     target_is_overseas = target_company.is_overseas if target_company else False
                     if target_is_overseas:
                         final_amount_krw = apply_rounding(
-                            final_amount_usd * (overseas_exchange_rate or 1),
+                            final_amount_usd * (effective_overseas_rate or 1),
                             effective_rounding_rule,
                         )
                         final_slip_currency = "USD"  # 해외법인은 무조건 USD
@@ -1159,7 +1209,7 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         wrbtr=final_wrbtr,
                         wrbtr_usd=final_amount_usd,
                         dmbtr_c=final_dmbtr_c,
-                        exchange_rate=overseas_exchange_rate
+                        exchange_rate=effective_overseas_rate
                         if target_is_overseas
                         else domestic_exchange_rate,
                         prctr=config.prctr,
@@ -1234,10 +1284,10 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         amount_krw = apply_rounding(amount_usd, effective_rounding_rule)
 
                     if is_overseas:
-                        slip_amount = apply_rounding(amount_usd, effective_rounding_rule)
-                        if overseas_exchange_rate and overseas_exchange_rate > 0:
+                        slip_amount = apply_rounding(amount_usd, effective_rounding_rule, decimals=2)
+                        if effective_overseas_rate and effective_overseas_rate > 0:
                             slip_amount_krw = apply_rounding(
-                                amount_usd * overseas_exchange_rate, effective_rounding_rule
+                                amount_usd * effective_overseas_rate, effective_rounding_rule
                             )
                     else:
                         slip_amount = amount_krw

@@ -278,6 +278,7 @@ export const slipApi = {
     include_additional_charges?: boolean;
     apply_pro_rata?: boolean;
     apply_split_billing?: boolean;
+    overseas_exchange_rate_input?: number;  // 해외 인보이스 기본 환율
   }) => api.post('/slip/generate', data),
   getSlips: (params: {
     batch_id?: string;
