@@ -1003,9 +1003,12 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
             if effective_overseas_rate is None:
                 effective_overseas_rate = overseas_exchange_rate
 
-            # 원화환산액 계산 (effective_overseas_rate 사용)
+            # 원화환산액 계산 (effective_overseas_rate 사용, 반올림 적용)
             if effective_overseas_rate and effective_overseas_rate > 0:
-                slip_amount_krw = apply_rounding(amount_usd * effective_overseas_rate, effective_rounding_rule)
+                # 해외 인보이스 원화환산은 반올림 적용 (소수점 없이)
+                slip_amount_krw = apply_rounding(
+                    amount_usd * effective_overseas_rate, "round_half_up"
+                )
                 applied_exchange_rate = effective_overseas_rate
             else:
                 slip_amount_krw = None  # 환율 없으면 원화환산액 없음
@@ -1036,7 +1039,8 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
                     use = min(remaining_usd, dep.remaining_amount)
                     rate = dep.exchange_rate if dep.exchange_rate else (effective_overseas_rate or 0)
-                    portion_krw = float(apply_rounding(use * rate, effective_rounding_rule))
+                    # 해외 인보이스 원화환산은 반올림 적용
+                    portion_krw = float(apply_rounding(use * rate, "round_half_up"))
                     fifo_krw += portion_krw
 
                     # 잔액 차감 및 소진 처리
@@ -1061,11 +1065,11 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
                     remaining_usd -= use
 
-                # 예치금 부족분은 계약별 유효 환율로 원화 환산
+                # 예치금 부족분은 계약별 유효 환율로 원화 환산 (반올림 적용)
                 if remaining_usd > 0:
                     fallback_rate = effective_overseas_rate or 0
                     fifo_krw += float(
-                        apply_rounding(remaining_usd * fallback_rate, effective_rounding_rule)
+                        apply_rounding(remaining_usd * fallback_rate, "round_half_up")
                     )
 
                 slip_amount_krw = int(fifo_krw)
@@ -1170,9 +1174,10 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                     # KRW 변환
                     target_is_overseas = target_company.is_overseas if target_company else False
                     if target_is_overseas:
+                        # 해외법인 원화환산은 반올림 적용
                         final_amount_krw = apply_rounding(
                             final_amount_usd * (effective_overseas_rate or 1),
-                            effective_rounding_rule,
+                            "round_half_up",
                         )
                         final_slip_currency = "USD"  # 해외법인은 무조건 USD
                         final_dmbtr_c = final_amount_krw
@@ -1286,8 +1291,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                     if is_overseas:
                         slip_amount = apply_rounding(amount_usd, effective_rounding_rule, decimals=2)
                         if effective_overseas_rate and effective_overseas_rate > 0:
+                            # 해외 인보이스 원화환산은 반올림 적용
                             slip_amount_krw = apply_rounding(
-                                amount_usd * effective_overseas_rate, effective_rounding_rule
+                                amount_usd * effective_overseas_rate, "round_half_up"
                             )
                     else:
                         slip_amount = amount_krw
