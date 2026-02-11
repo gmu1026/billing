@@ -6,20 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.alibaba import AccountCode, BPCode, ContractCode, CostCenter, TaxCode
-from app.utils import decode_csv_content
+from app.utils import clean_string, decode_csv_content
 
 router = APIRouter(prefix="/api/master", tags=["master"])
-
-
-def clean_string(value: str | None) -> str | None:
-    """문자열 정리"""
-    if not value:
-        return None
-    cleaned = value.strip()
-    return cleaned if cleaned else None
-
-
-# ===== BP Code =====
 
 
 @router.post("/bp-codes/upload")
@@ -145,9 +134,6 @@ def get_bp_code_detail(bp_number: str, db: Session = Depends(get_db)):
     }
 
 
-# ===== Account Code =====
-
-
 @router.post("/account-codes/upload")
 async def upload_account_codes(
     file: UploadFile = File(...),
@@ -216,9 +202,6 @@ def get_account_codes(
     ]
 
 
-# ===== Tax Code =====
-
-
 @router.post("/tax-codes/upload")
 async def upload_tax_codes(
     file: UploadFile = File(...),
@@ -269,9 +252,6 @@ def get_tax_codes(
         {"code": d.code, "description": d.description, "is_sales": d.is_sales}
         for d in query.order_by(TaxCode.code).all()
     ]
-
-
-# ===== Cost Center =====
 
 
 @router.post("/cost-centers/upload")
@@ -334,9 +314,6 @@ def get_cost_centers(
         }
         for d in query.order_by(CostCenter.cost_center).all()
     ]
-
-
-# ===== Contract Code =====
 
 
 @router.post("/contracts/upload")

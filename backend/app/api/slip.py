@@ -6,40 +6,9 @@ import csv
 import io
 import uuid
 from datetime import date, datetime
-from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-
-
-def round_decimal(value: float, places: int = 2) -> float:
-    """소수점 정확한 반올림 (ROUND_HALF_UP)"""
-    d = Decimal(str(value))
-    return float(d.quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP))
-
-
-def apply_rounding(amount: float, rule: str, decimals: int = 0) -> int | float:
-    """라운딩 규칙에 따른 금액 처리
-
-    Args:
-        amount: 원본 금액
-        rule: 라운딩 규칙 (floor, round_half_up, ceiling)
-        decimals: 소수점 자릿수 (0=정수, 2=소수점2자리)
-
-    Returns:
-        라운딩된 금액 (decimals=0이면 int, 아니면 float)
-    """
-    d = Decimal(str(amount))
-    quantize_value = Decimal(10) ** -decimals  # 0이면 1, 2이면 0.01
-
-    if rule == "ceiling":
-        result = d.quantize(quantize_value, rounding=ROUND_CEILING)
-    elif rule == "round_half_up":
-        result = d.quantize(quantize_value, rounding=ROUND_HALF_UP)
-    else:  # floor (default)
-        result = d.quantize(quantize_value, rounding=ROUND_DOWN)
-
-    return int(result) if decimals == 0 else float(result)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -55,7 +24,7 @@ from app.models.billing_profile import (
     PAYMENT_TYPE_TAX_CODE,
 )
 from app.models.hb import AccountContractMapping, HBCompany, HBContract, HBVendorAccount
-from app.models.billing_profile import AdditionalCharge
+from app.utils import apply_rounding, round_decimal
 from app.models.slip import (
     ExchangeRate,
     ExchangeRateDateRule,
@@ -69,7 +38,53 @@ from app.models.slip import (
 router = APIRouter(prefix="/api/slip", tags=["slip"])
 
 
-# ===== 환율 관리 =====
+def _upsert_exchange_rate(db: Session, row: dict) -> bool:
+    """환율 row를 upsert하고, 신규 삽입이면 True, 업데이트면 False 반환"""
+    rate_date_str = row.get("date")
+    if not rate_date_str:
+        return False
+
+    rate_date = datetime.strptime(rate_date_str, "%Y-%m-%d").date()
+    currency_code = row.get("code", "USD")
+
+    existing = (
+        db.query(ExchangeRate)
+        .filter(
+            ExchangeRate.rate_date == rate_date,
+            ExchangeRate.currency_from == currency_code,
+            ExchangeRate.currency_to == "KRW",
+        )
+        .first()
+    )
+
+    basic_rate = float(row.get("basic_rate", 0))
+    send_rate = float(row.get("send_rate", 0))
+    buy_rate = float(row.get("buy_rate", 0))
+    sell_rate = float(row.get("sell_rate", 0))
+
+    if existing:
+        existing.rate = basic_rate
+        existing.basic_rate = basic_rate
+        existing.send_rate = send_rate
+        existing.buy_rate = buy_rate
+        existing.sell_rate = sell_rate
+        existing.source = "hb"
+        return False
+    else:
+        db.add(
+            ExchangeRate(
+                rate_date=rate_date,
+                currency_from=currency_code,
+                currency_to="KRW",
+                rate=basic_rate,
+                basic_rate=basic_rate,
+                send_rate=send_rate,
+                buy_rate=buy_rate,
+                sell_rate=sell_rate,
+                source="hb",
+            )
+        )
+        return True
 
 
 class ExchangeRateCreate(BaseModel):
@@ -227,15 +242,9 @@ def calculate_rate_date(
     # 기본값 설정
     if slip_type == "sales":
         rule = (
-            config.exchange_rate_rule_sales
-            if config
-            else ExchangeRateDateRule.DOCUMENT_DATE.value
+            config.exchange_rate_rule_sales if config else ExchangeRateDateRule.DOCUMENT_DATE.value
         )
-        rate_type = (
-            config.exchange_rate_type_sales
-            if config
-            else ExchangeRateType.SEND_RATE.value
-        )
+        rate_type = config.exchange_rate_type_sales if config else ExchangeRateType.SEND_RATE.value
     else:  # purchase
         rule = (
             config.exchange_rate_rule_purchase
@@ -243,9 +252,7 @@ def calculate_rate_date(
             else ExchangeRateDateRule.DOCUMENT_DATE.value
         )
         rate_type = (
-            config.exchange_rate_type_purchase
-            if config
-            else ExchangeRateType.BASIC_RATE.value
+            config.exchange_rate_type_purchase if config else ExchangeRateType.BASIC_RATE.value
         )
 
     # 환율 적용일 계산
@@ -344,51 +351,12 @@ def import_exchange_rates_from_json(db: Session = Depends(get_db)):
     updated = 0
 
     for row in rows:
-        rate_date_str = row.get("date")
-        if not rate_date_str:
-            continue
-
-        rate_date = datetime.strptime(rate_date_str, "%Y-%m-%d").date()
-        currency_code = row.get("code", "USD")
-
-        # 기존 데이터 확인
-        existing = (
-            db.query(ExchangeRate)
-            .filter(
-                ExchangeRate.rate_date == rate_date,
-                ExchangeRate.currency_from == currency_code,
-                ExchangeRate.currency_to == "KRW",
-            )
-            .first()
-        )
-
-        basic_rate = float(row.get("basic_rate", 0))
-        send_rate = float(row.get("send_rate", 0))
-        buy_rate = float(row.get("buy_rate", 0))
-        sell_rate = float(row.get("sell_rate", 0))
-
-        if existing:
-            existing.rate = basic_rate
-            existing.basic_rate = basic_rate
-            existing.send_rate = send_rate
-            existing.buy_rate = buy_rate
-            existing.sell_rate = sell_rate
-            existing.source = "hb"
-            updated += 1
-        else:
-            new_rate = ExchangeRate(
-                rate_date=rate_date,
-                currency_from=currency_code,
-                currency_to="KRW",
-                rate=basic_rate,
-                basic_rate=basic_rate,
-                send_rate=send_rate,
-                buy_rate=buy_rate,
-                sell_rate=sell_rate,
-                source="hb",
-            )
-            db.add(new_rate)
-            imported += 1
+        is_new = _upsert_exchange_rate(db, row)
+        if row.get("date"):
+            if is_new:
+                imported += 1
+            else:
+                updated += 1
 
     db.commit()
 
@@ -450,50 +418,12 @@ def sync_exchange_rates_from_hb(
     updated = 0
 
     for row in rows:
-        rate_date_str = row.get("date")
-        if not rate_date_str:
-            continue
-
-        rate_date = datetime.strptime(rate_date_str, "%Y-%m-%d").date()
-        currency_code = row.get("code", "USD")
-
-        existing = (
-            db.query(ExchangeRate)
-            .filter(
-                ExchangeRate.rate_date == rate_date,
-                ExchangeRate.currency_from == currency_code,
-                ExchangeRate.currency_to == "KRW",
-            )
-            .first()
-        )
-
-        basic_rate = float(row.get("basic_rate", 0))
-        send_rate = float(row.get("send_rate", 0))
-        buy_rate = float(row.get("buy_rate", 0))
-        sell_rate = float(row.get("sell_rate", 0))
-
-        if existing:
-            existing.rate = basic_rate
-            existing.basic_rate = basic_rate
-            existing.send_rate = send_rate
-            existing.buy_rate = buy_rate
-            existing.sell_rate = sell_rate
-            existing.source = "hb"
-            updated += 1
-        else:
-            new_rate = ExchangeRate(
-                rate_date=rate_date,
-                currency_from=currency_code,
-                currency_to="KRW",
-                rate=basic_rate,
-                basic_rate=basic_rate,
-                send_rate=send_rate,
-                buy_rate=buy_rate,
-                sell_rate=sell_rate,
-                source="hb",
-            )
-            db.add(new_rate)
-            imported += 1
+        is_new = _upsert_exchange_rate(db, row)
+        if row.get("date"):
+            if is_new:
+                imported += 1
+            else:
+                updated += 1
 
     db.commit()
 
@@ -505,25 +435,12 @@ def sync_exchange_rates_from_hb(
     }
 
 
-# ===== 환율 적용일 계산 =====
-
-
 def calculate_exchange_rate_date(
     rule: str,
     document_date: date,
     billing_cycle: str | None = None,
 ) -> date:
-    """
-    환율 규칙에 따라 환율 적용일 계산
-
-    Args:
-        rule: 환율 적용일 규칙 (ExchangeRateDateRule)
-        document_date: 증빙일
-        billing_cycle: 정산월 (YYYYMM)
-
-    Returns:
-        환율 적용일
-    """
+    """환율 규칙에 따라 환율 적용일 계산"""
     if rule == ExchangeRateDateRule.DOCUMENT_DATE.value:
         return document_date
 
@@ -531,7 +448,7 @@ def calculate_exchange_rate_date(
         # 증빙일이 속한 월의 1일
         return date(document_date.year, document_date.month, 1)
 
-    elif rule == ExchangeRateDateRule.FIRST_OF_BILLING_MONTH.value:
+    elif rule == ExchangeRateDateRule.FIRST_OF_DOCUMENT_MONTH.value:
         # 정산월 1일
         if billing_cycle:
             year = int(billing_cycle[:4])
@@ -544,13 +461,11 @@ def calculate_exchange_rate_date(
         # 증빙일 기준 전월 말일
         first_of_month = date(document_date.year, document_date.month, 1)
         from datetime import timedelta
+
         return first_of_month - timedelta(days=1)
 
     else:  # custom 또는 기타
         return document_date
-
-
-# ===== 환율 자동 조회 헬퍼 =====
 
 
 def _sync_exchange_rates_from_hb_internal(db: Session, limit: int = 50) -> int:
@@ -587,54 +502,11 @@ def _sync_exchange_rates_from_hb_internal(db: Session, limit: int = 50) -> int:
     if not rows:
         return 0
 
-    count = 0
     for row in rows:
-        rate_date_str = row.get("date")
-        if not rate_date_str:
-            continue
-
-        rate_date = datetime.strptime(rate_date_str, "%Y-%m-%d").date()
-        currency_code = row.get("code", "USD")
-
-        existing = (
-            db.query(ExchangeRate)
-            .filter(
-                ExchangeRate.rate_date == rate_date,
-                ExchangeRate.currency_from == currency_code,
-                ExchangeRate.currency_to == "KRW",
-            )
-            .first()
-        )
-
-        basic_rate = float(row.get("basic_rate", 0))
-        send_rate = float(row.get("send_rate", 0))
-        buy_rate = float(row.get("buy_rate", 0))
-        sell_rate = float(row.get("sell_rate", 0))
-
-        if existing:
-            existing.rate = basic_rate
-            existing.basic_rate = basic_rate
-            existing.send_rate = send_rate
-            existing.buy_rate = buy_rate
-            existing.sell_rate = sell_rate
-            existing.source = "hb"
-        else:
-            new_rate = ExchangeRate(
-                rate_date=rate_date,
-                currency_from=currency_code,
-                currency_to="KRW",
-                rate=basic_rate,
-                basic_rate=basic_rate,
-                send_rate=send_rate,
-                buy_rate=buy_rate,
-                sell_rate=sell_rate,
-                source="hb",
-            )
-            db.add(new_rate)
-        count += 1
+        _upsert_exchange_rate(db, row)
 
     db.commit()
-    return count
+    return len(rows)
 
 
 def _get_exchange_rate_for_slip(
@@ -655,8 +527,8 @@ def _get_exchange_rate_for_slip(
     Returns:
         {"rate": float, "rate_type": str, "rate_date": date}
     """
-    # 1. 해외 매출의 경우: 월 1일자 basic_rate
-    if is_overseas and slip_type == "sales":
+    # 1. 해외법인: 증빙월 1일자 매매기준율 (basic_rate)
+    if is_overseas:
         first_day = date(document_date.year, document_date.month, 1)
         rate_record = (
             db.query(ExchangeRate)
@@ -743,9 +615,6 @@ def _ensure_exchange_rate(
     return result
 
 
-# ===== 전표 설정 =====
-
-
 @router.get("/config/{vendor}")
 def get_slip_config(vendor: str, db: Session = Depends(get_db)):
     """벤더별 전표 설정 조회"""
@@ -770,7 +639,7 @@ def get_slip_config(vendor: str, db: Session = Depends(get_db)):
             "exchange_rate_type_sales": ExchangeRateType.SEND_RATE.value,
             "exchange_rate_rule_purchase": ExchangeRateDateRule.DOCUMENT_DATE.value,
             "exchange_rate_type_purchase": ExchangeRateType.BASIC_RATE.value,
-            "exchange_rate_rule_overseas": ExchangeRateDateRule.FIRST_OF_BILLING_MONTH.value,
+            "exchange_rate_rule_overseas": ExchangeRateDateRule.FIRST_OF_DOCUMENT_MONTH.value,
             "exchange_rate_type_overseas": ExchangeRateType.BASIC_RATE.value,
         }
 
@@ -787,12 +656,18 @@ def get_slip_config(vendor: str, db: Session = Depends(get_db)):
         "sgtxt_template": config.sgtxt_template,
         "rounding_rule": config.rounding_rule,
         # 환율 규칙
-        "exchange_rate_rule_sales": config.exchange_rate_rule_sales or ExchangeRateDateRule.DOCUMENT_DATE.value,
-        "exchange_rate_type_sales": config.exchange_rate_type_sales or ExchangeRateType.SEND_RATE.value,
-        "exchange_rate_rule_purchase": config.exchange_rate_rule_purchase or ExchangeRateDateRule.DOCUMENT_DATE.value,
-        "exchange_rate_type_purchase": config.exchange_rate_type_purchase or ExchangeRateType.BASIC_RATE.value,
-        "exchange_rate_rule_overseas": config.exchange_rate_rule_overseas or ExchangeRateDateRule.FIRST_OF_BILLING_MONTH.value,
-        "exchange_rate_type_overseas": config.exchange_rate_type_overseas or ExchangeRateType.BASIC_RATE.value,
+        "exchange_rate_rule_sales": config.exchange_rate_rule_sales
+        or ExchangeRateDateRule.DOCUMENT_DATE.value,
+        "exchange_rate_type_sales": config.exchange_rate_type_sales
+        or ExchangeRateType.SEND_RATE.value,
+        "exchange_rate_rule_purchase": config.exchange_rate_rule_purchase
+        or ExchangeRateDateRule.DOCUMENT_DATE.value,
+        "exchange_rate_type_purchase": config.exchange_rate_type_purchase
+        or ExchangeRateType.BASIC_RATE.value,
+        "exchange_rate_rule_overseas": config.exchange_rate_rule_overseas
+        or ExchangeRateDateRule.FIRST_OF_DOCUMENT_MONTH.value,
+        "exchange_rate_type_overseas": config.exchange_rate_type_overseas
+        or ExchangeRateType.BASIC_RATE.value,
     }
 
 
@@ -833,14 +708,14 @@ def update_slip_config(vendor: str, data: SlipConfigUpdate, db: Session = Depend
     return {"success": True, "vendor": vendor}
 
 
-# ===== 전표 생성 =====
-
-
 class SlipGenerateRequest(BaseModel):
     billing_cycle: str  # YYYYMM
     slip_type: Literal["sales", "purchase"]  # sales=매출(enduser), purchase=매입(reseller)
     document_date: date  # 증빙일/전기일
     exchange_rate: float | None = None  # 환율 (없으면 자동 조회)
+    overseas_exchange_rate: float | None = (
+        None  # 해외법인 원화환산 환율 (수동 지정, 없으면 증빙월 1일 매매기준율)
+    )
     invoice_number: str | None = None  # 인보이스 번호 (수기)
     auto_exchange_rate: bool = True  # 환율 자동 조회 여부
     include_additional_charges: bool = True  # 추가 비용 포함 여부
@@ -932,9 +807,10 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
             domestic_exchange_rate = exchange_rate_info["rate"]
             exchange_rate_synced = exchange_rate_info.get("synced", False)
 
-    # 해외용 환율 (월 1일자 basic_rate)
-    overseas_exchange_rate = None
-    if data.auto_exchange_rate:
+    # 해외용 환율 (증빙월 1일자 매매기준율)
+    overseas_exchange_rate = data.overseas_exchange_rate  # 수동 지정
+    overseas_rate_info = None
+    if not overseas_exchange_rate and data.auto_exchange_rate:
         overseas_rate_info = _ensure_exchange_rate(
             db, data.document_date, data.slip_type, is_overseas=True
         )
@@ -997,18 +873,19 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         # BP 자동 매핑 (국내/해외 공통 - bp_number가 없는 경우)
         if not bp_number and company:
             if company.license:
-                matched_bp = db.query(BPCode).filter(
-                    BPCode.tax_number == company.license
-                ).first()
+                matched_bp = db.query(BPCode).filter(BPCode.tax_number == company.license).first()
                 if matched_bp:
                     bp_number = matched_bp.bp_number
                     company.bp_number = bp_number
 
             if not bp_number and company.name:
-                matched_bp = db.query(BPCode).filter(
-                    (BPCode.name_local == company.name) |
-                    (BPCode.name_english == company.name)
-                ).first()
+                matched_bp = (
+                    db.query(BPCode)
+                    .filter(
+                        (BPCode.name_local == company.name) | (BPCode.name_english == company.name)
+                    )
+                    .first()
+                )
                 if matched_bp:
                     bp_number = matched_bp.bp_number
                     company.bp_number = bp_number
@@ -1018,13 +895,15 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
         if is_internal:
             # 내부비용인 경우
-            internal_cost_list.append({
-                "uid": uid,
-                "amount_usd": round(amount_usd, 2),
-                "amount_krw": amount_krw,
-                "company_name": company.name if company else None,
-                "contract_name": contract.name if contract else None,
-            })
+            internal_cost_list.append(
+                {
+                    "uid": uid,
+                    "amount_usd": round(amount_usd, 2),
+                    "amount_krw": amount_krw,
+                    "company_name": company.name if company else None,
+                    "contract_name": contract.name if contract else None,
+                }
+            )
             # 매출전표: 완전 제외
             # 매입전표: 전표에는 안넣지만 집계만 함
             continue
@@ -1039,7 +918,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         if is_overseas and company:
             # 해외법인: 통화금액(WRBTR)은 USD, 원화환산액(DMBTR_C)은 별도 계산
             slip_currency = "USD"  # 해외법인은 무조건 USD
-            slip_amount = apply_rounding(amount_usd, rounding_rule, decimals=2)  # USD 금액 (소수점 2자리)
+            slip_amount = apply_rounding(
+                amount_usd, rounding_rule, decimals=2
+            )  # USD 금액 (소수점 2자리)
 
             # 원화환산액 계산 (월 1일자 basic_rate 사용)
             if overseas_exchange_rate and overseas_exchange_rate > 0:
@@ -1115,28 +996,34 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         dep.is_exhausted = True
 
                     # 사용 기록 생성 (배치 ID 연결)
-                    db.add(DepositUsage(
-                        deposit_id=dep.id,
-                        usage_date=data.document_date,
-                        amount=use,
-                        amount_krw=int(portion_krw),
-                        billing_cycle=data.billing_cycle,
-                        slip_batch_id=batch_id,
-                        uid=uid,
-                        description=f"전표 생성 ({data.billing_cycle})",
-                    ))
+                    db.add(
+                        DepositUsage(
+                            deposit_id=dep.id,
+                            usage_date=data.document_date,
+                            amount=use,
+                            amount_krw=int(portion_krw),
+                            billing_cycle=data.billing_cycle,
+                            slip_batch_id=batch_id,
+                            uid=uid,
+                            description=f"전표 생성 ({data.billing_cycle})",
+                        )
+                    )
 
                     remaining_usd -= use
 
                 # 예치금 부족분은 현재 환율로 원화 환산
                 if remaining_usd > 0:
                     fallback_rate = overseas_exchange_rate or 0
-                    fifo_krw += float(apply_rounding(remaining_usd * fallback_rate, effective_rounding_rule))
+                    fifo_krw += float(
+                        apply_rounding(remaining_usd * fallback_rate, effective_rounding_rule)
+                    )
 
                 slip_amount_krw = int(fifo_krw)
 
         # 계정코드 결정 (우선순위: 청구프로필 > BP코드 > 해외법인수출 > 기본값)
-        ar_account = config.ar_account_default if data.slip_type == "sales" else config.ap_account_default
+        ar_account = (
+            config.ar_account_default if data.slip_type == "sales" else config.ap_account_default
+        )
 
         # 해외법인인 경우 수출 계정코드 사용
         if is_overseas and data.slip_type == "sales":
@@ -1169,7 +1056,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         # 라운딩 규칙 적용 (계약 프로필 오버라이드가 있으면 다시 계산)
         if contract_billing_profile and contract_billing_profile.rounding_rule_override:
             if data.exchange_rate and data.exchange_rate > 0:
-                amount_krw = apply_rounding(amount_usd * data.exchange_rate, effective_rounding_rule)
+                amount_krw = apply_rounding(
+                    amount_usd * data.exchange_rate, effective_rounding_rule
+                )
             else:
                 amount_krw = apply_rounding(amount_usd, effective_rounding_rule)
 
@@ -1184,14 +1073,15 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
             if contract and contract.sales_contract_code
             else "매출ALI999"
         )
-        purchase_contract = sales_contract.replace("매출", "매입") if "매출" in sales_contract else "매입ALI999"
+        purchase_contract = (
+            sales_contract.replace("매출", "매입") if "매출" in sales_contract else "매입ALI999"
+        )
 
         # 부가세코드 (결제 방식에 따라 결정)
         tax_code = "A1"  # 기본값
         if billing_profile and billing_profile.payment_type:
             tax_code = PAYMENT_TYPE_TAX_CODE.get(billing_profile.payment_type, "A1")
 
-        # ===== 분할 청구 확인 =====
         split_applied = False
         split_slips_info = []
 
@@ -1206,9 +1096,11 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         continue
 
                     # 배분 대상 회사 정보 조회
-                    target_company = db.query(HBCompany).filter(
-                        HBCompany.seq == alloc["target_company_seq"]
-                    ).first()
+                    target_company = (
+                        db.query(HBCompany)
+                        .filter(HBCompany.seq == alloc["target_company_seq"])
+                        .first()
+                    )
                     target_bp = alloc["target_company_bp"]
 
                     # 일할 계산 적용 (분할 후 금액에 적용)
@@ -1228,12 +1120,20 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                     # KRW 변환
                     target_is_overseas = target_company.is_overseas if target_company else False
                     if target_is_overseas:
-                        final_amount_krw = apply_rounding(final_amount_usd * (overseas_exchange_rate or 1), effective_rounding_rule)
+                        final_amount_krw = apply_rounding(
+                            final_amount_usd * (overseas_exchange_rate or 1),
+                            effective_rounding_rule,
+                        )
                         final_slip_currency = "USD"  # 해외법인은 무조건 USD
                         final_dmbtr_c = final_amount_krw
-                        final_wrbtr = apply_rounding(final_amount_usd, effective_rounding_rule, decimals=2)  # 외화 소수점 2자리
+                        final_wrbtr = apply_rounding(
+                            final_amount_usd, effective_rounding_rule, decimals=2
+                        )  # 외화 소수점 2자리
                     else:
-                        final_amount_krw = apply_rounding(final_amount_usd * (domestic_exchange_rate or 1), effective_rounding_rule)
+                        final_amount_krw = apply_rounding(
+                            final_amount_usd * (domestic_exchange_rate or 1),
+                            effective_rounding_rule,
+                        )
                         final_slip_currency = "KRW"
                         final_dmbtr_c = None
                         final_wrbtr = final_amount_krw
@@ -1259,7 +1159,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         wrbtr=final_wrbtr,
                         wrbtr_usd=final_amount_usd,
                         dmbtr_c=final_dmbtr_c,
-                        exchange_rate=overseas_exchange_rate if target_is_overseas else domestic_exchange_rate,
+                        exchange_rate=overseas_exchange_rate
+                        if target_is_overseas
+                        else domestic_exchange_rate,
                         prctr=config.prctr,
                         zzcon=target_bp,
                         zzsconid=sales_contract,
@@ -1278,34 +1180,39 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                     db.add(split_slip)
                     seqno += 1
 
-                    split_slips_info.append({
-                        "target_company": alloc["target_company_name"],
-                        "amount_usd": final_amount_usd,
-                        "bp_number": target_bp,
-                    })
+                    split_slips_info.append(
+                        {
+                            "target_company": alloc["target_company_name"],
+                            "amount_usd": final_amount_usd,
+                            "bp_number": target_bp,
+                        }
+                    )
 
                     if not target_bp:
-                        slips_no_mapping.append({
-                            "uid": uid,
-                            "amount_usd": round(final_amount_usd, 2),
-                            "amount_krw": final_amount_krw,
-                            "account_name": account.name if account else None,
-                            "contract_name": contract.name if contract else None,
-                            "company_name": target_company.name if target_company else None,
-                            "split": True,
-                        })
+                        slips_no_mapping.append(
+                            {
+                                "uid": uid,
+                                "amount_usd": round(final_amount_usd, 2),
+                                "amount_krw": final_amount_krw,
+                                "account_name": account.name if account else None,
+                                "contract_name": contract.name if contract else None,
+                                "company_name": target_company.name if target_company else None,
+                                "split": True,
+                            }
+                        )
                     else:
-                        slips_created.append({
-                            "seqno": seqno - 1,
-                            "uid": uid,
-                            "bp_number": target_bp,
-                            "amount_krw": final_amount_krw,
-                            "split": True,
-                        })
+                        slips_created.append(
+                            {
+                                "seqno": seqno - 1,
+                                "uid": uid,
+                                "bp_number": target_bp,
+                                "amount_krw": final_amount_krw,
+                                "split": True,
+                            }
+                        )
 
         # 분할 적용되지 않은 경우 기존 로직 실행
         if not split_applied:
-            # ===== 일할 계산 적용 =====
             pro_rata_applied = None
             original_amount_usd = None
 
@@ -1320,14 +1227,18 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
                     # KRW 재계산
                     if domestic_exchange_rate and domestic_exchange_rate > 0:
-                        amount_krw = apply_rounding(amount_usd * domestic_exchange_rate, effective_rounding_rule)
+                        amount_krw = apply_rounding(
+                            amount_usd * domestic_exchange_rate, effective_rounding_rule
+                        )
                     else:
                         amount_krw = apply_rounding(amount_usd, effective_rounding_rule)
 
                     if is_overseas:
                         slip_amount = apply_rounding(amount_usd, effective_rounding_rule)
                         if overseas_exchange_rate and overseas_exchange_rate > 0:
-                            slip_amount_krw = apply_rounding(amount_usd * overseas_exchange_rate, effective_rounding_rule)
+                            slip_amount_krw = apply_rounding(
+                                amount_usd * overseas_exchange_rate, effective_rounding_rule
+                            )
                     else:
                         slip_amount = amount_krw
 
@@ -1371,41 +1282,55 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
             seqno += 1
 
             if not bp_number:
-                slips_no_mapping.append({
-                    "uid": uid,
-                    "amount_usd": round(amount_usd, 2),
-                    "amount_krw": amount_krw,
-                    "account_name": account.name if account else None,
-                    "contract_name": contract.name if contract else None,
-                    "company_name": company.name if company else None,
-                })
+                slips_no_mapping.append(
+                    {
+                        "uid": uid,
+                        "amount_usd": round(amount_usd, 2),
+                        "amount_krw": amount_krw,
+                        "account_name": account.name if account else None,
+                        "contract_name": contract.name if contract else None,
+                        "company_name": company.name if company else None,
+                    }
+                )
             else:
-                slips_created.append({
-                    "seqno": seqno - 1,
-                    "uid": uid,
-                    "bp_number": bp_number,
-                    "amount_krw": amount_krw,
-                })
+                slips_created.append(
+                    {
+                        "seqno": seqno - 1,
+                        "uid": uid,
+                        "bp_number": bp_number,
+                        "amount_krw": amount_krw,
+                    }
+                )
 
         # 해외법인 별도 집계
         if is_overseas and not split_applied:
-            overseas_slips.append({
-                "uid": uid,
-                "amount_usd": round(amount_usd, 2),
-                "currency": slip_currency,
-                "company_name": company.name if company else None,
-            })
+            overseas_slips.append(
+                {
+                    "uid": uid,
+                    "amount_usd": round(amount_usd, 2),
+                    "amount_krw": slip_amount_krw,
+                    "exchange_rate": applied_exchange_rate,
+                    "currency": slip_currency,
+                    "company_name": company.name if company else None,
+                }
+            )
 
-    # ===== 추가 비용 전표 생성 =====
     additional_charge_slips = []
     if data.include_additional_charges:
         # 해당 정산월에 적용되는 추가 비용 조회 (모든 계약 대상)
         processed_contracts = set()
         for billing in billing_summary:
             uid = billing.uid
-            account = db.query(HBVendorAccount).options(
-                joinedload(HBVendorAccount.contract_mappings).joinedload(AccountContractMapping.contract)
-            ).filter(HBVendorAccount.id == uid).first()
+            account = (
+                db.query(HBVendorAccount)
+                .options(
+                    joinedload(HBVendorAccount.contract_mappings).joinedload(
+                        AccountContractMapping.contract
+                    )
+                )
+                .filter(HBVendorAccount.id == uid)
+                .first()
+            )
 
             if not account or not account.contract_mappings:
                 continue
@@ -1433,7 +1358,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
 
                     # KRW 변환
                     if domestic_exchange_rate and domestic_exchange_rate > 0:
-                        charge_amount_krw = apply_rounding(charge_amount_usd * domestic_exchange_rate, rounding_rule)
+                        charge_amount_krw = apply_rounding(
+                            charge_amount_usd * domestic_exchange_rate, rounding_rule
+                        )
                     else:
                         charge_amount_krw = apply_rounding(charge_amount_usd, rounding_rule)
 
@@ -1456,8 +1383,12 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         sgtxt=charge_sgtxt,
                         partner=bp_number,
                         partner_name=company.name if company else None,
-                        ar_account=config.ar_account_default if data.slip_type == "sales" else config.ap_account_default,
-                        hkont=config.hkont_sales if data.slip_type == "sales" else config.hkont_purchase,
+                        ar_account=config.ar_account_default
+                        if data.slip_type == "sales"
+                        else config.ap_account_default,
+                        hkont=config.hkont_sales
+                        if data.slip_type == "sales"
+                        else config.hkont_purchase,
                         tax_code="A1",
                         wrbtr=charge_amount_krw,
                         wrbtr_usd=charge_amount_usd,
@@ -1465,7 +1396,9 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                         prctr=config.prctr,
                         zzcon=bp_number,
                         zzsconid=contract.sales_contract_code or "매출ALI999",
-                        zzpconid=(contract.sales_contract_code or "매출ALI999").replace("매출", "매입"),
+                        zzpconid=(contract.sales_contract_code or "매출ALI999").replace(
+                            "매출", "매입"
+                        ),
                         zzsempnm=contract.sales_person,
                         zzref2=config.zzref2,
                         zzinvno=data.invoice_number,
@@ -1477,13 +1410,15 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
                     db.add(charge_slip)
                     seqno += 1
 
-                    additional_charge_slips.append({
-                        "charge_name": charge.name,
-                        "charge_type": charge.charge_type,
-                        "amount_usd": charge_amount_usd,
-                        "amount_krw": charge_amount_krw,
-                        "company_name": company.name if company else None,
-                    })
+                    additional_charge_slips.append(
+                        {
+                            "charge_name": charge.name,
+                            "charge_type": charge.charge_type,
+                            "amount_usd": charge_amount_usd,
+                            "amount_krw": charge_amount_krw,
+                            "company_name": company.name if company else None,
+                        }
+                    )
 
     db.commit()
 
@@ -1499,8 +1434,18 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         "exchange_rate": {
             "domestic": domestic_exchange_rate,
             "overseas": overseas_exchange_rate,
+            "overseas_source": "manual" if data.overseas_exchange_rate else "auto",
+            "overseas_rate_date": str(overseas_rate_info.get("rate_date"))
+            if overseas_rate_info and overseas_rate_info.get("rate_date")
+            else (
+                str(date(data.document_date.year, data.document_date.month, 1))
+                if overseas_exchange_rate
+                else None
+            ),
             "rate_type": exchange_rate_info.get("rate_type") if exchange_rate_info else "manual",
-            "rate_date": str(exchange_rate_info.get("rate_date")) if exchange_rate_info and exchange_rate_info.get("rate_date") else str(data.document_date),
+            "rate_date": str(exchange_rate_info.get("rate_date"))
+            if exchange_rate_info and exchange_rate_info.get("rate_date")
+            else str(data.document_date),
             "synced_from_hb": exchange_rate_synced,
         },
         "total_slips": seqno - 1,
@@ -1521,9 +1466,13 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
     # 해외법인이 있는 경우 별도 표시
     if overseas_slips:
         overseas_total_usd = sum(item["amount_usd"] for item in overseas_slips)
+        overseas_total_krw = sum(item["amount_krw"] or 0 for item in overseas_slips)
         result["overseas"] = {
             "count": len(overseas_slips),
             "total_usd": round(overseas_total_usd, 2),
+            "total_krw": int(overseas_total_krw),
+            "exchange_rate": overseas_exchange_rate,
+            "exchange_rate_source": "manual" if data.overseas_exchange_rate else "auto",
             "details": overseas_slips[:20],
         }
 
@@ -1539,9 +1488,6 @@ def generate_slips(data: SlipGenerateRequest, db: Session = Depends(get_db)):
         }
 
     return result
-
-
-# ===== 전표 조회 =====
 
 
 @router.get("/")
@@ -1626,13 +1572,12 @@ def get_slip_batches(db: Session = Depends(get_db)):
     ]
 
 
-# ===== 전표 수정 =====
-
-
 class SlipUpdate(BaseModel):
     partner: str | None = None
     ar_account: str | None = None
     wrbtr: float | None = None
+    dmbtr_c: float | None = None  # 원화환산액 (해외법인용, 수동 수정)
+    exchange_rate: float | None = None  # 적용 환율 (수동 수정)
     zzsconid: str | None = None
     zzpconid: str | None = None
     zzsempnm: str | None = None
@@ -1693,258 +1638,250 @@ def confirm_slips(batch_id: str, db: Session = Depends(get_db)):
     return {"success": True, "confirmed": len(slips)}
 
 
-# ===== 전표 내보내기 =====
-
-
 def _format_amount(amount: float, currency: str) -> str | int:
     """통화에 따른 금액 포맷팅 - KRW는 정수, 외화는 소수점 2자리"""
     if currency == "KRW":
         return int(amount)
+    return f"{amount:.2f}"
+
+
+def _get_common_slip_fields(slip: SlipRecord, db: Session) -> dict:
+    """전표 공통 필드 추출"""
+    tax_number = ""
+    if slip.partner:
+        bp = db.query(BPCode).filter(BPCode.bp_number == slip.partner).first()
+        if bp:
+            tax_number = bp.tax_number or ""
+
+    dmbtr_c = ""
+    if slip.waers != "KRW" and slip.dmbtr_c:
+        dmbtr_c = int(slip.dmbtr_c)
+
+    wrbtr_display = _format_amount(slip.wrbtr, slip.waers)
+    bldat = slip.bldat.strftime("%Y%m%d") if slip.bldat else ""
+    budat = slip.budat.strftime("%Y%m%d") if slip.budat else ""
+
+    return {
+        "tax_number": tax_number,
+        "dmbtr_c": dmbtr_c,
+        "wrbtr_display": wrbtr_display,
+        "bldat": bldat,
+        "budat": budat,
+    }
+
+
+def _build_sales_row(slip: SlipRecord, f: dict) -> list:
+    return [
+        slip.seqno,
+        slip.bukrs,
+        f["bldat"],
+        f["budat"],
+        slip.waers,
+        slip.xblnr or "",
+        slip.sgtxt or "",
+        slip.partner or "",
+        slip.ar_account or "",
+        slip.hkont or "",
+        f["wrbtr_display"],
+        f["dmbtr_c"],
+        slip.prctr or "",
+        slip.zzcon or "",
+        slip.zzsconid or "",
+        slip.zzpconid or "",
+        slip.zzsempno or "",
+        slip.zzsempnm or "",
+        slip.zzref2 or "",
+        slip.zzref or "",
+        slip.zzinvno or "",
+        slip.zzdepgno or "",
+        "",
+        f["tax_number"],
+        slip.partner_name or "",
+    ]
+
+
+def _build_cost_row(slip: SlipRecord, f: dict) -> list:
+    return [
+        slip.seqno,
+        slip.bukrs,
+        f["bldat"],
+        f["budat"],
+        slip.waers,
+        slip.xblnr or "",
+        slip.sgtxt or "",
+        slip.hkont or "",
+        slip.ar_account or "",
+        f["wrbtr_display"],
+        f["dmbtr_c"],
+        slip.prctr or "",
+        slip.zzcon or "",
+        slip.zzpconid or "",
+        slip.zzsconid or "",
+        slip.zzsempno or "",
+        slip.zzsempnm or "",
+        slip.zzref2 or "",
+        slip.zzinvno or "",
+        slip.partner or "",
+        slip.zzref or "",
+        "",
+        f["tax_number"],
+        slip.partner_name or "",
+    ]
+
+
+def _build_billing_row(slip: SlipRecord, f: dict) -> list:
+    return [
+        slip.seqno,
+        slip.bukrs,
+        f["bldat"],
+        f["budat"],
+        slip.waers,
+        slip.xblnr or "",
+        slip.sgtxt or "",
+        slip.partner or "",
+        slip.ar_account or "",
+        slip.hkont or "",
+        f["wrbtr_display"],
+        f["dmbtr_c"],
+        slip.tax_code or "A1",
+        "",
+        "",
+        slip.prctr or "",
+        slip.zzcon or "",
+        slip.zzsconid or "",
+        slip.zzsempno or "",
+        slip.zzsempnm or "",
+        slip.zzref2 or "",
+        slip.zzref or "",
+        slip.zzinvno or "",
+        "",
+        "",
+        slip.zzdepgno or "",
+        "",
+        f["tax_number"],
+        slip.partner_name or "",
+        f["wrbtr_display"],
+    ]
+
+
+_EXPORT_CONFIGS = {
+    "sales": {
+        "headers": [
+            "SEQNO",
+            "BUKRS(회사코드)",
+            "BLDAT(증빙일)",
+            "BUDAT(전표적용일)",
+            "WAERS(통화)",
+            "XBLNR(참조)",
+            "SGTXT(전표적요)",
+            "PARTNER(거래처)",
+            "채권계정",
+            "HKONT(매출계정)",
+            "WRBTR(통화금액)",
+            "DMBTR_C(원화금액)",
+            "PRCTR(부서코드)",
+            "ZZCON(매출고객)",
+            "ZZSCONID(매출계약번호)",
+            "ZZPCONID(매입계약번호)",
+            "ZZSEMPNO(영업사원사번)",
+            "ZZSEMPNM(영업사원명)",
+            "ZZREF2(오퍼링)",
+            "ZZREF(세금계산서 승인번호)",
+            "ZZINVNO(인보이스)",
+            "ZZDEPGNO(예치금그룹번호)",
+            "",
+            "사업자번호",
+            "거래처명",
+        ],
+        "row_builder": _build_sales_row,
+    },
+    "cost": {
+        "headers": [
+            "SEQNO",
+            "BUKRS(회사코드)",
+            "BLDAT(증빙일)",
+            "BUDAT(전기일)",
+            "WAERS(통화)",
+            "XBLNR(참조)",
+            "BKTXT(전표적요)",
+            "HKONT(원가계정)",
+            "HKONT(상대계정)",
+            "WRBTR(통화금액)",
+            "DMBTR_C(원화금액)",
+            "KOSTL(코스트센터)",
+            "ZZCON(매출고객)",
+            "ZZPCONID(매입계약번호)",
+            "매출계약번호",
+            "ZZSEMPNO(영업사원사번)",
+            "ZZSEMPNM(영업사원명)",
+            "ZZREF2(오퍼링)",
+            "ZZINVNO(인보이스)",
+            "ZZLIFNR(구매처)",
+            "ZZREF(세금계산서승인번호)",
+            "",
+            "사업자번호",
+            "거래처명",
+        ],
+        "row_builder": _build_cost_row,
+    },
+    "billing": {
+        "headers": [
+            "SEQNO",
+            "BUKRS(회사코드)",
+            "BLDAT(세금계산서발행일)",
+            "BUDAT(전표적용일)",
+            "WAERS(통화)",
+            "XBLNR(참조)",
+            "SGTXT(전표적요)",
+            "PARTNER(거래처)",
+            "HKONT(차변계정)",
+            "HKONT(대변계정)",
+            "WRBTR(통화금액)",
+            "DMBTR_C(원화금액)",
+            "MWSKZ(부가세코드)",
+            "부가세액(거래통화)",
+            "ZTERM(수금조건)",
+            "PRCTR(부서코드)",
+            "ZZCON(매출고객)",
+            "ZZSCONID(매출계약번호)",
+            "ZZSEMPNO(영업사원사번)",
+            "ZZSEMPNM(영업사원명)",
+            "ZZREF2(오퍼링)",
+            "ZZREF(세금계산서 승인번호)",
+            "ZZINVNO(인보이스)",
+            "ZZREF3(고객담당자명)",
+            "ZZSETKEY(고객담당자email)",
+            "ZZDEPGNO(예치금그룹번호)",
+            "",
+            "사업자번호",
+            "사명",
+            "공급가",
+        ],
+        "row_builder": _build_billing_row,
+    },
+}
+
+
+def _export_slips(slips: list[SlipRecord], db: Session, slip_type: str) -> tuple[list, list]:
+    """통합 전표 내보내기"""
+    if slip_type in ("purchase", "cost"):
+        config = _EXPORT_CONFIGS["cost"]
+    elif slip_type == "billing":
+        config = _EXPORT_CONFIGS["billing"]
     else:
-        # 외화는 소수점 2자리까지 표시 (0.10, 0.01 등 유지)
-        return f"{amount:.2f}"
+        config = _EXPORT_CONFIGS["sales"]
 
-
-def _export_sales_slip(slips: list[SlipRecord], db: Session) -> tuple[list, list]:
-    """매출전표 양식 (22열 + 공백 + 검증용 2열)"""
-    headers = [
-        "SEQNO",
-        "BUKRS(회사코드)",
-        "BLDAT(증빙일)",
-        "BUDAT(전표적용일)",
-        "WAERS(통화)",
-        "XBLNR(참조)",
-        "SGTXT(전표적요)",
-        "PARTNER(거래처)",
-        "채권계정",
-        "HKONT(매출계정)",
-        "WRBTR(통화금액)",
-        "DMBTR_C(원화금액)",
-        "PRCTR(부서코드)",
-        "ZZCON(매출고객)",
-        "ZZSCONID(매출계약번호)",
-        "ZZPCONID(매입계약번호)",
-        "ZZSEMPNO(영업사원사번)",
-        "ZZSEMPNM(영업사원명)",
-        "ZZREF2(오퍼링)",
-        "ZZREF(세금계산서 승인번호)",
-        "ZZINVNO(인보이스)",
-        "ZZDEPGNO(예치금그룹번호)",
-        "",  # 공백 열
-        "사업자번호",
-        "거래처명",
-    ]
-
+    row_builder = config["row_builder"]
     rows = []
     for slip in slips:
-        # BP 정보 조회
-        tax_number = ""
-        if slip.partner:
-            bp = db.query(BPCode).filter(BPCode.bp_number == slip.partner).first()
-            if bp:
-                tax_number = bp.tax_number or ""
+        fields = _get_common_slip_fields(slip, db)
+        rows.append(row_builder(slip, fields))
 
-        # DMBTR_C: 해외법인(통화가 KRW가 아닌 경우) 원화환산액
-        dmbtr_c = ""
-        if slip.waers != "KRW" and slip.dmbtr_c:
-            dmbtr_c = int(slip.dmbtr_c)
-
-        row = [
-            slip.seqno,
-            slip.bukrs,
-            slip.bldat.strftime("%Y%m%d") if slip.bldat else "",
-            slip.budat.strftime("%Y%m%d") if slip.budat else "",
-            slip.waers,
-            slip.xblnr or "",
-            slip.sgtxt or "",
-            slip.partner or "",
-            slip.ar_account or "",
-            slip.hkont or "",
-            _format_amount(slip.wrbtr, slip.waers),
-            dmbtr_c,  # DMBTR_C (해외법인 원화환산액)
-            slip.prctr or "",
-            slip.zzcon or "",
-            slip.zzsconid or "",
-            slip.zzpconid or "",
-            slip.zzsempno or "",
-            slip.zzsempnm or "",
-            slip.zzref2 or "",
-            slip.zzref or "",
-            slip.zzinvno or "",
-            slip.zzdepgno or "",
-            "",  # 공백 열
-            tax_number,
-            slip.partner_name or "",
-        ]
-        rows.append(row)
-
-    return headers, rows
-
-
-def _export_cost_slip(slips: list[SlipRecord], db: Session) -> tuple[list, list]:
-    """원가전표 양식 (21열 + 공백 + 검증용 2열)"""
-    headers = [
-        "SEQNO",
-        "BUKRS(회사코드)",
-        "BLDAT(증빙일)",
-        "BUDAT(전기일)",
-        "WAERS(통화)",
-        "XBLNR(참조)",
-        "BKTXT(전표적요)",
-        "HKONT(원가계정)",
-        "HKONT(상대계정)",
-        "WRBTR(통화금액)",
-        "DMBTR_C(원화금액)",
-        "KOSTL(코스트센터)",
-        "ZZCON(매출고객)",
-        "ZZPCONID(매입계약번호)",
-        "매출계약번호",
-        "ZZSEMPNO(영업사원사번)",
-        "ZZSEMPNM(영업사원명)",
-        "ZZREF2(오퍼링)",
-        "ZZINVNO(인보이스)",
-        "ZZLIFNR(구매처)",
-        "ZZREF(세금계산서승인번호)",
-        "",  # 공백 열
-        "사업자번호",
-        "거래처명",
-    ]
-
-    rows = []
-    for slip in slips:
-        # BP 정보 조회
-        tax_number = ""
-        if slip.partner:
-            bp = db.query(BPCode).filter(BPCode.bp_number == slip.partner).first()
-            if bp:
-                tax_number = bp.tax_number or ""
-
-        # DMBTR_C: 해외법인(통화가 KRW가 아닌 경우) 원화환산액
-        dmbtr_c = ""
-        if slip.waers != "KRW" and slip.dmbtr_c:
-            dmbtr_c = int(slip.dmbtr_c)
-
-        row = [
-            slip.seqno,
-            slip.bukrs,
-            slip.bldat.strftime("%Y%m%d") if slip.bldat else "",
-            slip.budat.strftime("%Y%m%d") if slip.budat else "",
-            slip.waers,
-            slip.xblnr or "",
-            slip.sgtxt or "",  # BKTXT (전표적요)
-            slip.hkont or "",  # HKONT(원가계정)
-            slip.ar_account or "",  # HKONT(상대계정)
-            _format_amount(slip.wrbtr, slip.waers),
-            dmbtr_c,  # DMBTR_C (해외법인 원화환산액)
-            slip.prctr or "",  # KOSTL(코스트센터) - prctr 필드 사용
-            slip.zzcon or "",
-            slip.zzpconid or "",
-            slip.zzsconid or "",  # 매출계약번호
-            slip.zzsempno or "",
-            slip.zzsempnm or "",
-            slip.zzref2 or "",
-            slip.zzinvno or "",
-            slip.partner or "",  # ZZLIFNR(구매처) - partner 필드 사용
-            slip.zzref or "",
-            "",  # 공백 열
-            tax_number,
-            slip.partner_name or "",
-        ]
-        rows.append(row)
-
-    return headers, rows
-
-
-def _export_billing_slip(slips: list[SlipRecord], db: Session) -> tuple[list, list]:
-    """청구전표 양식 (26열 + 공백 + 검증용 3열)"""
-    headers = [
-        "SEQNO",
-        "BUKRS(회사코드)",
-        "BLDAT(세금계산서발행일)",
-        "BUDAT(전표적용일)",
-        "WAERS(통화)",
-        "XBLNR(참조)",
-        "SGTXT(전표적요)",
-        "PARTNER(거래처)",
-        "HKONT(차변계정)",
-        "HKONT(대변계정)",
-        "WRBTR(통화금액)",
-        "DMBTR_C(원화금액)",
-        "MWSKZ(부가세코드)",
-        "부가세액(거래통화)",
-        "ZTERM(수금조건)",
-        "PRCTR(부서코드)",
-        "ZZCON(매출고객)",
-        "ZZSCONID(매출계약번호)",
-        "ZZSEMPNO(영업사원사번)",
-        "ZZSEMPNM(영업사원명)",
-        "ZZREF2(오퍼링)",
-        "ZZREF(세금계산서 승인번호)",
-        "ZZINVNO(인보이스)",
-        "ZZREF3(고객담당자명)",
-        "ZZSETKEY(고객담당자email)",
-        "ZZDEPGNO(예치금그룹번호)",
-        "",  # 공백 열
-        "사업자번호",
-        "사명",
-        "공급가",
-    ]
-
-    rows = []
-    for slip in slips:
-        # BP 정보 조회
-        tax_number = ""
-        if slip.partner:
-            bp = db.query(BPCode).filter(BPCode.bp_number == slip.partner).first()
-            if bp:
-                tax_number = bp.tax_number or ""
-
-        # DMBTR_C: 해외법인(통화가 KRW가 아닌 경우) 원화환산액
-        dmbtr_c = ""
-        if slip.waers != "KRW" and slip.dmbtr_c:
-            dmbtr_c = int(slip.dmbtr_c)
-
-        wrbtr_display = _format_amount(slip.wrbtr, slip.waers)
-
-        row = [
-            slip.seqno,
-            slip.bukrs,
-            slip.bldat.strftime("%Y%m%d") if slip.bldat else "",
-            slip.budat.strftime("%Y%m%d") if slip.budat else "",
-            slip.waers,
-            slip.xblnr or "",
-            slip.sgtxt or "",
-            slip.partner or "",
-            slip.ar_account or "",  # HKONT(차변계정)
-            slip.hkont or "",  # HKONT(대변계정)
-            wrbtr_display,
-            dmbtr_c,  # DMBTR_C (해외법인 원화환산액)
-            slip.tax_code or "A1",  # MWSKZ(부가세코드)
-            "",  # 부가세액(거래통화) - 별도 계산 필요
-            "",  # ZTERM(수금조건)
-            slip.prctr or "",
-            slip.zzcon or "",
-            slip.zzsconid or "",
-            slip.zzsempno or "",
-            slip.zzsempnm or "",
-            slip.zzref2 or "",
-            slip.zzref or "",
-            slip.zzinvno or "",
-            "",  # ZZREF3(고객담당자명)
-            "",  # ZZSETKEY(고객담당자email)
-            slip.zzdepgno or "",
-            "",  # 공백 열
-            tax_number,
-            slip.partner_name or "",
-            wrbtr_display,  # 공급가
-        ]
-        rows.append(row)
-
-    return headers, rows
+    return config["headers"], rows
 
 
 @router.get("/export/{batch_id}")
-def export_slips(batch_id: str, db: Session = Depends(get_db)):
+def export_slips_csv(batch_id: str, db: Session = Depends(get_db)):
     """전표 CSV 내보내기 (전표 유형별 양식 적용)"""
     slips = (
         db.query(SlipRecord)
@@ -1957,15 +1894,7 @@ def export_slips(batch_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Batch not found")
 
     slip_type = slips[0].slip_type if slips else "sales"
-
-    # 전표 유형별 양식 선택
-    if slip_type in ("purchase", "cost"):
-        # 매입(purchase) = 원가전표 양식
-        headers, rows = _export_cost_slip(slips, db)
-    elif slip_type == "billing":
-        headers, rows = _export_billing_slip(slips, db)
-    else:  # sales (매출) - 기본값
-        headers, rows = _export_sales_slip(slips, db)
+    headers, rows = _export_slips(slips, db, slip_type)
 
     # CSV 생성
     output = io.StringIO()
@@ -1987,9 +1916,6 @@ def export_slips(batch_id: str, db: Session = Depends(get_db)):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
-
-
-# ===== 전표 삭제 =====
 
 
 @router.delete("/batch/{batch_id}")
@@ -2025,9 +1951,6 @@ def delete_batch(batch_id: str, db: Session = Depends(get_db)):
     return {"success": True, "deleted": count}
 
 
-# ===== 추가 비용, 일할 계산, 분할 청구 처리 헬퍼 함수 =====
-
-
 def _get_applicable_additional_charges(
     db: Session,
     contract_seq: int,
@@ -2036,6 +1959,7 @@ def _get_applicable_additional_charges(
 ) -> list:
     """특정 정산월/전표유형에 적용되는 추가 비용 조회"""
     from app.api.additional_charge import get_applicable_charges
+
     return get_applicable_charges(db, contract_seq, billing_cycle, slip_type)
 
 
@@ -2049,12 +1973,14 @@ def _get_pro_rata_ratio(
     """전표 생성 시 일할 비율 조회"""
     from app.api.pro_rata import get_pro_rata_ratio
 
-    pro_rata_enabled = config.pro_rata_enabled if hasattr(config, 'pro_rata_enabled') else True
-    pro_rata_override = contract_profile.pro_rata_override if contract_profile and hasattr(contract_profile, 'pro_rata_override') else None
-
-    return get_pro_rata_ratio(
-        db, contract_seq, billing_cycle, pro_rata_enabled, pro_rata_override
+    pro_rata_enabled = config.pro_rata_enabled if hasattr(config, "pro_rata_enabled") else True
+    pro_rata_override = (
+        contract_profile.pro_rata_override
+        if contract_profile and hasattr(contract_profile, "pro_rata_override")
+        else None
     )
+
+    return get_pro_rata_ratio(db, contract_seq, billing_cycle, pro_rata_enabled, pro_rata_override)
 
 
 def _get_split_rule(
@@ -2064,6 +1990,7 @@ def _get_split_rule(
 ):
     """분할 청구 규칙 조회"""
     from app.api.split_billing import get_split_rule_for_uid
+
     return get_split_rule_for_uid(db, uid, billing_cycle)
 
 
@@ -2075,6 +2002,7 @@ def _calculate_split_amounts(
 ) -> dict | None:
     """분할 청구 금액 계산"""
     from app.api.split_billing import calculate_split_amounts
+
     return calculate_split_amounts(db, uid, amount_usd, billing_cycle)
 
 
@@ -2133,7 +2061,9 @@ def _create_slip_record(
     sales_contract = (
         contract.sales_contract_code if contract and contract.sales_contract_code else "매출ALI999"
     )
-    purchase_contract = sales_contract.replace("매출", "매입") if "매출" in sales_contract else "매입ALI999"
+    purchase_contract = (
+        sales_contract.replace("매출", "매입") if "매출" in sales_contract else "매입ALI999"
+    )
 
     # 부가세코드
     tax_code = "A1"

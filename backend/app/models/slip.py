@@ -121,7 +121,9 @@ class SlipRecord(Base):
 
     # 메타데이터
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class ExchangeRate(Base):
@@ -157,7 +159,9 @@ class SlipConfig(Base):
     bukrs: Mapped[str] = mapped_column(String(10), default="1100")
     prctr: Mapped[str] = mapped_column(String(20), default="10000003")
     hkont_sales: Mapped[str] = mapped_column(String(20), default="41021010")  # 매출 계정 (국내)
-    hkont_sales_export: Mapped[str] = mapped_column(String(20), default="41021020")  # 매출 계정 (수출)
+    hkont_sales_export: Mapped[str] = mapped_column(
+        String(20), default="41021020"
+    )  # 매출 계정 (수출)
     hkont_purchase: Mapped[str] = mapped_column(String(20), default="42021010")  # 매입 계정
     ar_account_default: Mapped[str] = mapped_column(String(20), default="11060110")  # 기본 채권과목
     ap_account_default: Mapped[str] = mapped_column(String(20), default="21120110")  # 기본 채무과목
@@ -185,7 +189,7 @@ class SlipConfig(Base):
 
     # 해외법인 환율 규칙 (원화환산용)
     exchange_rate_rule_overseas: Mapped[str] = mapped_column(
-        String(30), default=ExchangeRateDateRule.FIRST_OF_BILLING_MONTH.value
+        String(30), default=ExchangeRateDateRule.FIRST_OF_DOCUMENT_MONTH.value
     )
     exchange_rate_type_overseas: Mapped[str] = mapped_column(
         String(20), default=ExchangeRateType.BASIC_RATE.value
@@ -198,7 +202,9 @@ class SlipConfig(Base):
     )  # 계산 방식: calendar_days (달력일수), business_days (영업일수)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class SlipTemplate(Base):
@@ -211,10 +217,14 @@ class SlipTemplate(Base):
     slip_type: Mapped[str] = mapped_column(String(20), index=True)  # sales, billing, purchase
 
     # 컬럼 구성 (순서 포함)
-    columns: Mapped[dict[str, Any]] = mapped_column(JSON)  # [{"name": "SEQNO", "header": "SEQNO", ...}, ...]
+    columns: Mapped[dict[str, Any]] = mapped_column(
+        JSON
+    )  # [{"name": "SEQNO", "header": "SEQNO", ...}, ...]
 
     # 고정값 (벤더별로 다를 수 있으나 양식에서 추출한 기본값)
-    fixed_values: Mapped[dict[str, Any]] = mapped_column(JSON)  # {"BUKRS": "1100", "PRCTR": "10000003", ...}
+    fixed_values: Mapped[dict[str, Any]] = mapped_column(
+        JSON
+    )  # {"BUKRS": "1100", "PRCTR": "10000003", ...}
 
     # 계정 매핑 (국내/해외 등 조건별)
     account_mappings: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -236,4 +246,6 @@ class SlipTemplate(Base):
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )

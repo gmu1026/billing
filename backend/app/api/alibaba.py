@@ -1,41 +1,16 @@
 import csv
 import io
-from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from app.utils import decode_csv_content
-
-
-def round_decimal(value: float, places: int = 2) -> float:
-    """소수점 정확한 반올림 (ROUND_HALF_UP)"""
-    d = Decimal(str(value))
-    return float(d.quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP))
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.alibaba import AlibabaBilling
+from app.utils import clean_string, decode_csv_content, parse_float
 
 router = APIRouter(prefix="/api/alibaba", tags=["alibaba"])
-
-
-def parse_float(value: str) -> float:
-    """문자열을 float으로 변환 (빈값/오류 시 0 반환)"""
-    if not value or value.strip() == "":
-        return 0.0
-    try:
-        return float(value.replace(",", ""))
-    except ValueError:
-        return 0.0
-
-
-def clean_string(value: str | None) -> str | None:
-    """문자열 정리 (탭, 공백 제거)"""
-    if not value:
-        return None
-    cleaned = value.strip().replace("\t", "")
-    return cleaned if cleaned else None
 
 
 @router.post("/upload/{billing_type}")
@@ -203,15 +178,12 @@ def get_alibaba_summary(
     # UID별 합계
     if billing_type == "reseller":
         # Reseller: linked_user_id 기준 (실제 고객)
-        summary = (
-            db.query(
-                AlibabaBilling.linked_user_id.label("uid"),
-                AlibabaBilling.linked_user_name.label("user_name"),
-                func.sum(AlibabaBilling.calculated_amount).label("total_amount"),
-                func.count(AlibabaBilling.id).label("record_count"),
-            )
-            .filter(AlibabaBilling.billing_type == "reseller")
-        )
+        summary = db.query(
+            AlibabaBilling.linked_user_id.label("uid"),
+            AlibabaBilling.linked_user_name.label("user_name"),
+            func.sum(AlibabaBilling.calculated_amount).label("total_amount"),
+            func.count(AlibabaBilling.id).label("record_count"),
+        ).filter(AlibabaBilling.billing_type == "reseller")
         if billing_cycle:
             summary = summary.filter(AlibabaBilling.billing_cycle == billing_cycle)
         summary = summary.group_by(
@@ -219,15 +191,12 @@ def get_alibaba_summary(
         ).all()
     else:
         # Enduser: user_id 기준
-        summary = (
-            db.query(
-                AlibabaBilling.user_id.label("uid"),
-                AlibabaBilling.user_name.label("user_name"),
-                func.sum(AlibabaBilling.calculated_amount).label("total_amount"),
-                func.count(AlibabaBilling.id).label("record_count"),
-            )
-            .filter(AlibabaBilling.billing_type == "enduser")
-        )
+        summary = db.query(
+            AlibabaBilling.user_id.label("uid"),
+            AlibabaBilling.user_name.label("user_name"),
+            func.sum(AlibabaBilling.calculated_amount).label("total_amount"),
+            func.count(AlibabaBilling.id).label("record_count"),
+        ).filter(AlibabaBilling.billing_type == "enduser")
         if billing_cycle:
             summary = summary.filter(AlibabaBilling.billing_cycle == billing_cycle)
         summary = summary.group_by(AlibabaBilling.user_id, AlibabaBilling.user_name).all()

@@ -23,7 +23,6 @@
 import csv
 import json
 import re
-from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -46,12 +45,7 @@ def is_korean_tax_number(tax_number: str | None) -> bool:
 
 
 def detect_overseas_company(license_no: str | None) -> tuple[bool, str]:
-    """
-    사업자번호로 해외법인 여부 감지
-
-    Returns:
-        tuple[is_overseas, default_currency]
-    """
+    """사업자번호로 해외법인 여부 감지 -> (is_overseas, default_currency)"""
     if not license_no:
         return False, "KRW"
 
@@ -100,10 +94,6 @@ def detect_overseas_company(license_no: str | None) -> tuple[bool, str]:
     return False, "KRW"
 
 
-def round_decimal(value: float, places: int = 2) -> float:
-    """소수점 정확한 반올림 (ROUND_HALF_UP)"""
-    d = Decimal(str(value))
-    return float(d.quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP))
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -116,10 +106,10 @@ from app.models.alibaba import (
     TaxCode,
 )
 from app.models.hb import HBCompany, HBContract, HBVendorAccount
+from app.utils import clean_string, parse_float
 
 router = APIRouter(prefix="/api/import", tags=["file-import"])
 
-# 프로젝트 루트의 data/import 폴더
 IMPORT_DIR = Path(__file__).parent.parent.parent.parent / "data" / "import"
 
 
@@ -133,24 +123,7 @@ def read_file_with_encoding(file_path: Path) -> str:
         except UnicodeDecodeError:
             continue
 
-    # 마지막 수단: errors='ignore'로 읽기
     return file_path.read_text(encoding="utf-8", errors="ignore")
-
-
-def parse_float(value: str) -> float:
-    if not value or value.strip() == "":
-        return 0.0
-    try:
-        return float(value.replace(",", ""))
-    except ValueError:
-        return 0.0
-
-
-def clean_string(value: str | None) -> str | None:
-    if not value:
-        return None
-    cleaned = value.strip().replace("\t", "")
-    return cleaned if cleaned else None
 
 
 @router.get("/scan")
@@ -360,13 +333,15 @@ def import_master_file(
                 if existing:
                     continue
 
-                db.add(AccountCode(
-                    hkont=hkont,
-                    name_short=clean_string(row.get("계정명(short)")),
-                    name_long=clean_string(row.get("계정명(long)")),
-                    account_group=clean_string(row.get("계정그룹")),
-                    currency=clean_string(row.get("관리통화")) or "KRW",
-                ))
+                db.add(
+                    AccountCode(
+                        hkont=hkont,
+                        name_short=clean_string(row.get("계정명(short)")),
+                        name_long=clean_string(row.get("계정명(long)")),
+                        account_group=clean_string(row.get("계정그룹")),
+                        currency=clean_string(row.get("관리통화")) or "KRW",
+                    )
+                )
                 inserted += 1
             except Exception as e:
                 errors.append(f"Row {i + 2}: {str(e)}")
@@ -399,14 +374,16 @@ def import_master_file(
             if existing:
                 continue
 
-            db.add(CostCenter(
-                company_code=clean_string(row.get("회사 코드")) or "1100",
-                cost_center=cost_center,
-                name=clean_string(row.get("부서명")),
-                profit_center=clean_string(row.get("손익 센터")),
-                profit_center_name=clean_string(row.get("손익 센터 명")),
-                source_system=clean_string(row.get("Source 시스템")),
-            ))
+            db.add(
+                CostCenter(
+                    company_code=clean_string(row.get("회사 코드")) or "1100",
+                    cost_center=cost_center,
+                    name=clean_string(row.get("부서명")),
+                    profit_center=clean_string(row.get("손익 센터")),
+                    profit_center_name=clean_string(row.get("손익 센터 명")),
+                    source_system=clean_string(row.get("Source 시스템")),
+                )
+            )
             inserted += 1
 
     elif master_type == "contract":
@@ -416,7 +393,9 @@ def import_master_file(
             if not sales_contract:
                 continue
 
-            existing = db.query(ContractCode).filter(ContractCode.sales_contract == sales_contract).first()
+            existing = (
+                db.query(ContractCode).filter(ContractCode.sales_contract == sales_contract).first()
+            )
             if existing:
                 continue
 
@@ -434,11 +413,13 @@ def import_master_file(
 
             description = clean_string(list(row.values())[1]) if len(row.values()) > 1 else None
 
-            db.add(ContractCode(
-                sales_contract=sales_contract,
-                description=description,
-                vendor=vendor,
-            ))
+            db.add(
+                ContractCode(
+                    sales_contract=sales_contract,
+                    description=description,
+                    vendor=vendor,
+                )
+            )
             inserted += 1
 
     db.commit()
@@ -512,9 +493,11 @@ def import_hb_file(
                 # 사업자번호 정규화 (하이픈 제거)
                 normalized_license = license_no.replace("-", "").strip()
                 # BP 코드에서 tax_number로 검색
-                bp = db.query(BPCode).filter(
-                    BPCode.tax_number.like(f"%{normalized_license}%")
-                ).first()
+                bp = (
+                    db.query(BPCode)
+                    .filter(BPCode.tax_number.like(f"%{normalized_license}%"))
+                    .first()
+                )
                 if bp:
                     bp_number = bp.bp_number
                     bp_matched += 1
@@ -583,8 +566,12 @@ def import_hb_file(
             existing = db.query(HBContract).filter(HBContract.seq == seq).first()
 
             # to, cc 이메일 리스트를 JSON 문자열로 변환
-            email_to = json.dumps(item.get("to", []), ensure_ascii=False) if item.get("to") else None
-            email_cc = json.dumps(item.get("cc", []), ensure_ascii=False) if item.get("cc") else None
+            email_to = (
+                json.dumps(item.get("to", []), ensure_ascii=False) if item.get("to") else None
+            )
+            email_cc = (
+                json.dumps(item.get("cc", []), ensure_ascii=False) if item.get("cc") else None
+            )
 
             record_data = {
                 "seq": seq,
@@ -622,32 +609,46 @@ def import_hb_file(
                 # 이번 세션에서 이미 처리한 UID인지 확인
                 if account_id not in processed_uids:
                     # DB에 존재하는지 확인
-                    existing_acc = db.query(HBVendorAccount).filter(HBVendorAccount.id == account_id).first()
+                    existing_acc = (
+                        db.query(HBVendorAccount).filter(HBVendorAccount.id == account_id).first()
+                    )
                     if not existing_acc:
-                        db.add(HBVendorAccount(
-                            id=account_id,
-                            vendor="alibaba",
-                            name=item.get("name"),  # 계약명을 계정명으로 사용
-                            is_active=True,
-                        ))
+                        db.add(
+                            HBVendorAccount(
+                                id=account_id,
+                                vendor="alibaba",
+                                name=item.get("name"),  # 계약명을 계정명으로 사용
+                                is_active=True,
+                            )
+                        )
                         accounts_inserted += 1
                     processed_uids.add(account_id)
 
                 # 계정-계약 매핑 생성
-                existing_mapping = db.query(AccountContractMapping).filter(
-                    AccountContractMapping.account_id == account_id,
-                    AccountContractMapping.contract_seq == seq,
-                ).first()
+                existing_mapping = (
+                    db.query(AccountContractMapping)
+                    .filter(
+                        AccountContractMapping.account_id == account_id,
+                        AccountContractMapping.contract_seq == seq,
+                    )
+                    .first()
+                )
 
                 if not existing_mapping:
                     mapping_type = acc.get("type", "all")
-                    projects = json.dumps(acc.get("projects", []), ensure_ascii=False) if acc.get("projects") else None
-                    db.add(AccountContractMapping(
-                        account_id=account_id,
-                        contract_seq=seq,
-                        mapping_type=mapping_type,
-                        projects=projects,
-                    ))
+                    projects = (
+                        json.dumps(acc.get("projects", []), ensure_ascii=False)
+                        if acc.get("projects")
+                        else None
+                    )
+                    db.add(
+                        AccountContractMapping(
+                            account_id=account_id,
+                            contract_seq=seq,
+                            mapping_type=mapping_type,
+                            projects=projects,
+                        )
+                    )
 
     elif data_type == "account":
         # hb_account.json은 HB 사용자 데이터이므로 스킵
